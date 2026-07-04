@@ -2,6 +2,7 @@ import os
 import zipfile
 import urllib.request
 import pandas as pd
+from pathlib import Path
 
 try:
     import polars as pl
@@ -158,3 +159,20 @@ def load_coordinates(file_path: str, min_qv: float = 20.0) -> pd.DataFrame:
     
     print(f"Loaded {len(pdf)} transcripts.")
     return pdf
+
+def load_transcript_data(file_path: str) -> pd.DataFrame:
+    """
+    Loads and optimizes spatial transcriptomics coordinate files.
+    Expects a CSV with columns: 'x', 'y', 'gene'
+    """
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"No spatial transcript file found at {file_path}")
+        
+    # Read with explicit, low-memory datatypes to save RAM on big datasets
+    df = pd.read_csv(
+        path,
+        usecols=['x', 'y', 'gene'],
+        dtype={'x': 'float32', 'y': 'float32', 'gene': 'category'}
+    )
+    return df

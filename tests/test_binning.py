@@ -9,7 +9,7 @@ from src.spatial_pipeline.binning import (
     build_sparse_matrix,
     compute_square_bins
 )
-from src.spatial_pipeline.graphs import build_adjacency_graph
+from src.spatial_pipeline.graphs import build_spatial_graph
 
 def test_bin_square():
     x = np.array([0.0, 5.0, 10.0, 14.9, 15.0])
@@ -119,9 +119,8 @@ def test_build_adjacency_graph_square():
     x, y = np.meshgrid([5, 15, 25], [5, 15, 25])
     bin_centers = np.column_stack((x.flatten(), y.flatten()))
     
-    # Center node is at index 4 (15, 15)
-    # With 4-connectivity: neighbors are indices 1 (15, 5), 3 (5, 15), 5 (25, 15), 7 (15, 25)
-    adj_4 = build_adjacency_graph(bin_centers, "square", resolution, connectivity=4)
+    # 4-connectivity: neighbors are indices 1 (15, 5), 3 (5, 15), 5 (25, 15), 7 (15, 25)
+    adj_4, lap_4 = build_spatial_graph(bin_centers, max_distance=10.1)
     assert adj_4[4, 4] == 0  # No self loop
     assert adj_4[4, 1] == 1
     assert adj_4[4, 3] == 1
@@ -130,10 +129,14 @@ def test_build_adjacency_graph_square():
     assert adj_4[4, 0] == 0  # Diagonal is not neighbor
     assert adj_4.sum(axis=1)[4] == 4
     
-    # With 8-connectivity: all 8 neighbors are connected
-    adj_8 = build_adjacency_graph(bin_centers, "square", resolution, connectivity=8)
+    # 8-connectivity: all 8 neighbors are connected
+    adj_8, lap_8 = build_spatial_graph(bin_centers, max_distance=14.2)
     assert adj_8.sum(axis=1)[4] == 8
     assert adj_8[4, 0] == 1  # Diagonal neighbor connected
+    
+    # Laplacian matrix checks (L = D - A)
+    assert lap_8[4, 4] == 8
+    assert lap_8[4, 0] == -1
 
 def test_build_adjacency_graph_hex():
     resolution = 10.0
@@ -150,12 +153,17 @@ def test_build_adjacency_graph_hex():
     ])
     
     bin_centers = get_bin_centers(unique_bins, "hex", resolution)
-    adj = build_adjacency_graph(bin_centers, "hex", resolution)
+    adj, lap = build_spatial_graph(bin_centers, max_distance=resolution * 1.01)
     
     # The center node (index 0) should be connected to all 6 surrounding nodes (indices 1 to 6)
     assert adj.sum(axis=1)[0] == 6
     for i in range(1, 7):
         assert adj[0, i] == 1
+        
+    # Check Laplacian: L[0,0] = degree = 6, and L[0, i] = -1
+    assert lap[0, 0] == 6
+    for i in range(1, 7):
+        assert lap[0, i] == -1
 
 def test_square_binning_aggregation():
     # Create mock data: 3 molecules sitting in the exact same spatial bin area
