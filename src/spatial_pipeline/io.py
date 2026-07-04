@@ -32,12 +32,31 @@ def download_dataset(url: str, output_dir: str) -> str:
     if not os.path.exists(download_path):
         print(f"Downloading dataset from {url}...")
         
-        # Simple progress reporter
-        def reporthook(count, block_size, total_size):
-            percent = int(count * block_size * 100 / total_size)
-            print(f"Progress: {percent}% completed ({count * block_size}/{total_size} bytes)", end="\r")
+        req = urllib.request.Request(
+            url, 
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+        )
+        
+        with urllib.request.urlopen(req) as response, open(download_path, "wb") as out_file:
+            total_size = int(response.headers.get("content-length", 0))
+            block_size = 1024 * 64  # 64 KB chunks
+            count = 0
             
-        urllib.request.urlretrieve(url, download_path, reporthook)
+            while True:
+                chunk = response.read(block_size)
+                if not chunk:
+                    break
+                out_file.write(chunk)
+                count += 1
+                if total_size > 0:
+                    percent = int(count * block_size * 100 / total_size)
+                    percent = min(percent, 100)
+                    print(f"Progress: {percent}% completed ({count * block_size}/{total_size} bytes)", end="\r")
+                else:
+                    print(f"Downloaded {count * block_size} bytes", end="\r")
+                    
         print("\nDownload complete.")
     else:
         print(f"Dataset already exists at {download_path}")
