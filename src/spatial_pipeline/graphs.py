@@ -1,84 +1,64 @@
 import numpy as np
 from scipy.spatial import KDTree
-from scipy.sparse import coo_matrix, csr_matrix
-from typing import Union, Set, Tuple
+from scipy.sparse import csr_matrix
+from typing import Tuple
 
-def build_adjacency_graph(
-    bin_centers: np.ndarray, 
-    bin_type: str, 
-    resolution: float, 
-    connectivity: int = 8,
-    include_self: bool = False
-) -> csr_matrix:
+def build_spatial_graph(
+    bin_coords: np.ndarray, 
+    max_distance: float
+) -> Tuple[csr_matrix, csr_matrix]:
     """
-    Generates a spatial adjacency graph representing neighbor bins using scipy.spatial.KDTree.
+    Constructs a spatial adjacency graph and its corresponding Graph Laplacian.
     
-    Parameters
-    ----------
-    bin_centers : np.ndarray
-        2D array of shape (M, 2) containing Cartesian center coordinates for each active bin.
-    bin_type : str
-        Type of grid: "square" or "hex".
-    resolution : float
-        Grid resolution (spacing between centers or side length).
-    connectivity : int
-        Connectivity for square grid neighbors: 4 (edge sharing) or 8 (edge and corner sharing).
-        Ignored for hexagonal grids (always 6-connectivity).
-    include_self : bool
-        If True, self-loops are added to the adjacency matrix.
+    Parameters:
+        bin_coords: Array of shape (N, 2) holding the (x, y) center coordinates of each bin.
+        max_distance: The maximum radius to consider two distinct bins as spatial neighbors.
         
-    Returns
-    -------
-    scipy.sparse.csr_matrix
-        A symmetric sparse adjacency matrix of shape (M, M) with 1s at neighbor positions.
+    Returns:
+        adjacency_matrix: Sparse binary matrix where matrix[i, j] = 1 if bins are neighbors.
+        laplacian_matrix: Sparse Graph Laplacian matrix (L = D - A).
     """
-    if len(bin_centers) == 0:
-        return csr_matrix((0, 0), dtype=int)
-        
-    # Build KDTree on the bin center coordinates
-    tree = KDTree(bin_centers)
+    num_bins = bin_coords.shape[0]
     
-    # Define distance threshold based on grid type and connectivity
-    if bin_type == "square":
-        if connectivity == 4:
-            # 4-connected: only immediate horizontal and vertical neighbors (distance = resolution)
-            threshold = 1.01 * resolution
-        elif connectivity == 8:
-            # 8-connected: includes diagonal neighbors (distance = resolution * sqrt(2))
-            threshold = 1.01 * resolution * np.sqrt(2.0)
-        else:
-            raise ValueError(f"Unsupported connectivity for square bins: {connectivity}. Use 4 or 8.")
-            
-    elif bin_type == "hex":
-        # Hexagonal grid: distance between center and all 6 neighbors is exactly resolution
-        threshold = 1.01 * resolution
-        
+    # 1. Build a fast KDTree for spatial query lookup
+    tree = KDTree(bin_coords)
+    
+    # 2. Query pairs of bins that sit within the neighbor distance threshold
+    # avoid_self=True drops the self-distance diagonal entries
+    neighbor_pairs = tree.query_pairs(r=max_distance, output_type='ndarray')
+    
+    if len(neighbor_pairs) == 0:
+        # Fallback handle case for zero spatial overlaps
+        row_indices = np.array([], dtype=np.int32)
+        col_indices = np.array([], dtype=np.int32)
     else:
-        raise ValueError(f"Unknown bin type: {bin_type}")
+        row_indices = neighbor_pairs[:, 0]
+        col_indices = neighbor_pairs[:, 1]
         
-    # Query all pairs within threshold distance (excluding self-pairs)
-    pairs_set = tree.query_pairs(r=threshold)
+    # Since an adjacency graph is symmetric/undirected, mirror the connection pairs
+    rows = np.concatenate([row_indices, col_indices])
+    cols = np.concatenate([col_indices, row_indices])
+    data = np.ones_like(rows, dtype=np.float32)
     
-    if len(pairs_set) == 0:
-        row = np.array([], dtype=int)
-        col = np.array([], dtype=int)
-        data = np.array([], dtype=int)
-    else:
-        pairs = np.array(list(pairs_set))
-        # Since the graph is undirected, make the adjacency matrix symmetric
-        row = np.concatenate([pairs[:, 0], pairs[:, 1]])
-        col = np.concatenate([pairs[:, 1], pairs[:, 0]])
-        data = np.ones(len(row), dtype=int)
-        
-    if include_self:
-        n_nodes = len(bin_centers)
-        self_rows = np.arange(n_nodes)
-        row = np.concatenate([row, self_rows])
-        col = np.concatenate([col, self_rows])
-        data = np.concatenate([data, np.ones(n_nodes, dtype=int)])
-        
-    # Build sparse COO matrix and convert to CSR for efficiency
-    n_nodes = len(bin_centers)
-    adj_matrix = coo_matrix((data, (row, col)), shape=(n_nodes, n_nodes), dtype=int)
+    # Construct Sparse Adjacency Matrix (A)
+    adjacency_matrix = csr_matrix(
+        (data, (rows, cols)), 
+        shape=(num_bins, num_bins), 
+        dtype=np.float32
+    )
     
-    return adj_matrix.tocsr()
+    # 3. Calculate Degree values (sum of rows) to form Diagonal Matrix D
+    degrees = np.array(adjacency_matrix.sum(axis=1)).flatten()
+    
+    # Construct the sparse diagonal Degree Matrix
+    # We use a custom manual CSR structure to cleanly subtract them next
+    degree_matrix = csr_matrix(
+        (degrees, (np.arange(num_bins), np.arange(num_bins))),
+        shape=(num_bins, num_bins),
+        dtype=np.float32
+    )
+    
+    # Math: Graph Laplacian is defined as L = D - A
+    laplacian_matrix = degree_matrix - adjacency_matrix
+    
+    return adjacency_matrix, laplacian_matrix
