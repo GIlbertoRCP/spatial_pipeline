@@ -1,11 +1,13 @@
 import numpy as np
+import pandas as pd
 import pytest
 from scipy.sparse import csr_matrix
 from src.spatial_pipeline.binning import (
     bin_square, 
     bin_hexagonal, 
     get_bin_centers, 
-    build_sparse_matrix
+    build_sparse_matrix,
+    compute_square_bins
 )
 from src.spatial_pipeline.graphs import build_adjacency_graph
 
@@ -154,3 +156,19 @@ def test_build_adjacency_graph_hex():
     assert adj.sum(axis=1)[0] == 6
     for i in range(1, 7):
         assert adj[0, i] == 1
+
+def test_square_binning_aggregation():
+    # Create mock data: 3 molecules sitting in the exact same spatial bin area
+    mock_data = pd.DataFrame({
+        'x': [10.2, 10.5, 10.8],
+        'y': [20.1, 20.4, 20.3],
+        'gene': pd.Series(['GeneA', 'GeneB', 'GeneA'], dtype='category')
+    })
+    
+    # Run binning with a resolution wide enough to hold all 3 molecules
+    sparse_counts, bin_coords = compute_square_bins(mock_data, resolution=5.0)
+    
+    # Assertions to verify our array tracking dimensions match expectations
+    assert sparse_counts.shape[0] == 1  # All coordinates must collapse to exactly 1 unique bin
+    assert sparse_counts[0, 0] == 2    # Count for GeneA should equal 2
+    assert sparse_counts[0, 1] == 1    # Count for GeneB should equal 1

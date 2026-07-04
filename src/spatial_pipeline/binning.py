@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from scipy.sparse import coo_matrix, csr_matrix, csc_matrix
 from typing import Tuple, Dict, Any, Union
 
@@ -177,3 +178,59 @@ def build_sparse_matrix(
         raise ValueError(f"Unsupported sparse matrix format: {matrix_format}. Use 'csr' or 'csc'.")
         
     return sparse_matrix, unique_bins, unique_genes
+
+def compute_square_bins(
+    df: pd.DataFrame, 
+    resolution: float
+) -> Tuple[csr_matrix, np.ndarray]:
+    """
+    Spatially bins continuous coordinate points into discrete grid blocks.
+    
+    Parameters:
+        df: DataFrame containing 'x', 'y', and 'gene' columns.
+        resolution: The physical size/width of each square bin.
+        
+    Returns:
+        sparse_counts: A Compressed Sparse Row matrix (bins x unique_genes).
+        bin_coords: An array of shape (N, 2) holding the actual center (x, y) 
+                    coordinates for each valid bin index.
+    """
+    x = df['x'].to_numpy()
+    y = df['y'].to_numpy()
+    
+    # Map genes to unique integer categorical codes
+    gene_codes = df['gene'].cat.codes.to_numpy()
+    num_genes = len(df['gene'].cat.categories)
+    
+    # Establish grid origin points
+    x_min, y_min = x.min(), y.min()
+    
+    # Math: Compute integer index positions for every single transcript molecule
+    grid_x = ((x - x_min) // resolution).astype(np.int32)
+    grid_y = ((y - y_min) // resolution).astype(np.int32)
+    
+    # Calculate unique 1D bin IDs using stride configuration
+    max_grid_x = grid_x.max() + 1
+    bin_ids = grid_y * max_grid_x + grid_x
+    
+    # Map active bin IDs to sequential row indices (eliminating empty space)
+    unique_bins, inverse_indices = np.unique(bin_ids, return_inverse=True)
+    num_unique_bins = len(unique_bins)
+    
+    # Reconstruct physical spatial centers for the unique active bins
+    unique_grid_y = unique_bins // max_grid_x
+    unique_grid_x = unique_bins % max_grid_x
+    
+    bin_x_centers = x_min + (unique_grid_x + 0.5) * resolution
+    bin_y_centers = y_min + (unique_grid_y + 0.5) * resolution
+    bin_coords = np.column_stack((bin_x_centers, bin_y_centers))
+    
+    # Construct an optimized high-performance Compressed Sparse Row Matrix
+    # format: matrix[row_idx, col_idx] = value
+    sparse_counts = csr_matrix(
+        (np.ones_like(inverse_indices), (inverse_indices, gene_codes)),
+        shape=(num_unique_bins, num_genes),
+        dtype=np.int32
+    )
+    
+    return sparse_counts, bin_coords
