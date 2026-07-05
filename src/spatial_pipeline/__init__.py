@@ -1,4 +1,4 @@
-from .io import download_dataset, load_coordinates, load_transcript_data
+from .io import download_dataset, load_coordinates, load_transcript_data, generate_vectorized_mock_data
 from .binning import bin_square, bin_hexagonal, get_bin_centers, build_sparse_matrix, compute_square_bins
 from .graphs import build_spatial_graph
 
@@ -6,6 +6,7 @@ __all__ = [
     "download_dataset",
     "load_coordinates",
     "load_transcript_data",
+    "generate_vectorized_mock_data",
     "bin_square",
     "bin_hexagonal",
     "get_bin_centers",

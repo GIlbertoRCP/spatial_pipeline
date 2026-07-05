@@ -2,6 +2,7 @@ import os
 import zipfile
 import urllib.request
 import pandas as pd
+import numpy as np
 from pathlib import Path
 
 try:
@@ -176,3 +177,50 @@ def load_transcript_data(file_path: str) -> pd.DataFrame:
         dtype={'x': 'float32', 'y': 'float32', 'gene': 'category'}
     )
     return df
+
+def generate_vectorized_mock_data(file_path: str, num_molecules: int = 15000) -> None:
+    """
+    Instantly generates thousands of realistic spatial coordinates and mock gene labels
+    using fully vectorized NumPy functions (no loops), then saves to a CSV.
+    """
+    print(f"[*] Instantly generating {num_molecules} synthetic transcripts using vectorized NumPy...")
+    np.random.seed(42)
+    
+    # Half of the molecules are uniform background noise
+    n_back = num_molecules // 2
+    n_clust = num_molecules - n_back
+    
+    x_back = np.random.uniform(10.0, 500.0, n_back)
+    y_back = np.random.uniform(10.0, 500.0, n_back)
+    
+    # Half are clustered around 5 spatial centers
+    n_clusters = 5
+    centers = np.random.uniform(50.0, 450.0, (n_clusters, 2))
+    cluster_ids = np.random.randint(0, n_clusters, size=n_clust)
+    assigned_centers = centers[cluster_ids]
+    
+    # Generate Gaussian noise around cluster centers vectorially
+    noise = np.random.normal(0.0, 15.0, (n_clust, 2))
+    x_clust = assigned_centers[:, 0] + noise[:, 0]
+    y_clust = assigned_centers[:, 1] + noise[:, 1]
+    
+    # Concatenate
+    x = np.concatenate([x_back, x_clust])
+    y = np.concatenate([y_back, y_clust])
+    
+    # Clip coordinates to bounds
+    x = np.clip(x, 10.0, 500.0)
+    y = np.clip(y, 10.0, 500.0)
+    
+    # Vectorized gene assignment
+    gene_list = ["GAPDH", "ACTB", "MALAT1", "EPCAM", "CD3D"]
+    genes = np.random.choice(gene_list, size=num_molecules)
+    
+    df = pd.DataFrame({
+        "x": x.astype(np.float32),
+        "y": y.astype(np.float32),
+        "gene": genes
+    })
+    
+    df.to_csv(file_path, index=False)
+    print(f"[+] Vectorized mock dataset saved to: {file_path}")
