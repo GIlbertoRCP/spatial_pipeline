@@ -15,6 +15,7 @@ output/
 output_square/
 output_hex/
 test_data.csv
+mock_transcripts.csv
 *.zip
 *.gz
 *.parquet
