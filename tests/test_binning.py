@@ -1,3 +1,5 @@
+import os
+import shutil
 import numpy as np
 import pandas as pd
 import pytest
@@ -10,6 +12,11 @@ from src.spatial_pipeline.binning import (
     compute_square_bins
 )
 from src.spatial_pipeline.graphs import build_spatial_graph
+from src.spatial_pipeline.out_of_core import (
+    partition_dataset_to_tiles,
+    process_tile_out_of_core,
+    stitch_out_of_core_results
+)
 
 def test_bin_square():
     x = np.array([0.0, 5.0, 10.0, 14.9, 15.0])
@@ -180,3 +187,76 @@ def test_square_binning_aggregation():
     assert sparse_counts.shape[0] == 1  # All coordinates must collapse to exactly 1 unique bin
     assert sparse_counts[0, 0] == 2    # Count for GeneA should equal 2
     assert sparse_counts[0, 1] == 1    # Count for GeneB should equal 1
+
+def test_out_of_core_equivalence():
+    # 1. Generate test dataset df
+    mock_data = pd.DataFrame({
+        'x': [12.5, 13.1, 55.0, 14.2, 85.0, 88.0, 102.0],
+        'y': [45.2, 44.8, 82.1, 46.0, 81.0, 83.0, 105.0],
+        'gene': pd.Series(['GAPDH', 'GAPDH', 'MALAT1', 'ACTB', 'GAPDH', 'MALAT1', 'ACTB'], dtype='category')
+    })
+    
+    # Save mock data to temporary file
+    csv_file = "test_data_ooc.csv"
+    mock_data.to_csv(csv_file, index=False)
+    
+    # Parameters
+    tile_size = 50.0
+    resolution = 10.0
+    max_dist = 15.0
+    
+    # 2. In-memory results
+    sparse_counts_in_mem, bin_coords_in_mem = compute_square_bins(mock_data, resolution)
+    adj_in_mem, lap_in_mem = build_spatial_graph(bin_coords_in_mem, max_dist)
+    
+    # 3. Out-of-core results
+    partition_dir = "tmp_partition_ooc"
+    tmp_out_dir = "tmp_out_ooc"
+    
+    partition_dataset_to_tiles(csv_file, tile_size, partition_dir)
+    
+    # Identify which tiles exist on disk
+    tiles = []
+    for f in os.listdir(partition_dir):
+        if f.startswith("tile_") and f.endswith(".csv"):
+            parts = f[5:-4].split("_")
+            tiles.append((int(parts[0]), int(parts[1])))
+            
+    # Process each tile
+    for tx, ty in tiles:
+        process_tile_out_of_core(tx, ty, tile_size, resolution, max_dist, partition_dir, tmp_out_dir)
+        
+    # Stitch
+    counts_ooc, centers_ooc, genes_ooc, adj_ooc, lap_ooc = stitch_out_of_core_results(tmp_out_dir, resolution)
+    
+    # Clean up files
+    try:
+        os.remove(csv_file)
+        shutil.rmtree(partition_dir)
+        shutil.rmtree(tmp_out_dir)
+    except OSError:
+        pass
+        
+    # 4. Assert mathematical equivalence
+    assert counts_ooc.shape[0] == sparse_counts_in_mem.shape[0]
+    
+    # Sort bins to align comparison since sorting indices might vary
+    in_mem_sort = np.lexsort((bin_coords_in_mem[:, 1], bin_coords_in_mem[:, 0]))
+    ooc_sort = np.lexsort((centers_ooc[:, 1], centers_ooc[:, 0]))
+    
+    np.testing.assert_allclose(centers_ooc[ooc_sort], bin_coords_in_mem[in_mem_sort])
+    
+    # Compare count matrices after sorting rows
+    counts_in_mem_sorted = sparse_counts_in_mem[in_mem_sort].toarray()
+    counts_ooc_sorted = counts_ooc[ooc_sort].toarray()
+    np.testing.assert_array_equal(counts_ooc_sorted, counts_in_mem_sorted)
+    
+    # Compare Adjacency Matrix
+    adj_in_mem_sorted = adj_in_mem[in_mem_sort][:, in_mem_sort].toarray()
+    adj_ooc_sorted = adj_ooc[ooc_sort][:, ooc_sort].toarray()
+    np.testing.assert_allclose(adj_ooc_sorted, adj_in_mem_sorted)
+    
+    # Compare Laplacian
+    lap_in_mem_sorted = lap_in_mem[in_mem_sort][:, in_mem_sort].toarray()
+    lap_ooc_sorted = lap_ooc[ooc_sort][:, ooc_sort].toarray()
+    np.testing.assert_allclose(lap_ooc_sorted, lap_in_mem_sorted)
