@@ -4,12 +4,22 @@ import urllib.request
 import pandas as pd
 import numpy as np
 from pathlib import Path
+from typing import Dict, Any, Union
 
 try:
     import polars as pl
     HAS_POLARS = True
 except ImportError:
     HAS_POLARS = False
+
+try:
+    import pyarrow as pa
+    import pyarrow.csv as pa_csv
+    import pyarrow.parquet as pa_parquet
+    HAS_PYARROW = True
+except ImportError:
+    HAS_PYARROW = False
+
 
 def download_dataset(url: str, output_dir: str) -> str:
     """
@@ -161,15 +171,86 @@ def load_coordinates(file_path: str, min_qv: float = 20.0) -> pd.DataFrame:
     print(f"Loaded {len(pdf)} transcripts.")
     return pdf
 
-def load_transcript_data(file_path: str) -> pd.DataFrame:
+def load_transcript_arrow(file_path: str) -> "pa.Table":
+    """
+    Loads spatial transcriptomics coordinate file into a PyArrow Table for zero-copy memory operations.
+    Supports CSV and Parquet formats.
+    
+    Parameters
+    ----------
+    file_path : str
+        Path to spatial transcripts CSV or Parquet file.
+        
+    Returns
+    -------
+    pa.Table
+        PyArrow Table containing columns 'x', 'y', 'gene'.
+    """
+    if not HAS_PYARROW:
+        raise ImportError("PyArrow is not installed. Install with `pip install pyarrow`.")
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"No spatial transcript file found at {file_path}")
+
+    str_path = str(path)
+    if str_path.endswith(".parquet"):
+        table = pa_parquet.read_table(str_path, columns=["x", "y", "gene"])
+    else:
+        convert_options = pa_csv.ConvertOptions(
+            column_types={
+                "x": pa.float32(),
+                "y": pa.float32(),
+                "gene": pa.string()
+            },
+            include_columns=["x", "y", "gene"]
+        )
+        table = pa_csv.read_csv(str_path, convert_options=convert_options)
+    return table
+
+def arrow_table_to_numpy(table: "pa.Table") -> Dict[str, np.ndarray]:
+    """
+    Converts PyArrow Table columns into NumPy arrays using zero-copy memory transfers where possible.
+    
+    Parameters
+    ----------
+    table : pa.Table
+        PyArrow Table with columns 'x', 'y', 'gene'.
+        
+    Returns
+    -------
+    Dict[str, np.ndarray]
+        Dictionary with keys 'x', 'y', 'gene' containing 1D NumPy arrays.
+    """
+    if not HAS_PYARROW:
+        raise ImportError("PyArrow is not installed.")
+        
+    x_arr = table["x"].to_numpy(zero_copy_only=False)
+    y_arr = table["y"].to_numpy(zero_copy_only=False)
+    gene_arr = table["gene"].to_numpy(zero_copy_only=False)
+    return {"x": x_arr, "y": y_arr, "gene": gene_arr}
+
+def load_transcript_data(file_path: str, use_arrow: bool = False) -> pd.DataFrame:
     """
     Loads and optimizes spatial transcriptomics coordinate files.
     Expects a CSV with columns: 'x', 'y', 'gene'
+    
+    Parameters
+    ----------
+    file_path : str
+        Path to the CSV file.
+    use_arrow : bool, default False
+        If True, uses PyArrow engine for zero-copy memory loading.
     """
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"No spatial transcript file found at {file_path}")
-        
+
+    if use_arrow and HAS_PYARROW:
+        table = load_transcript_arrow(file_path)
+        df = table.to_pandas(types_mapper=None)
+        df['gene'] = df['gene'].astype('category')
+        return df
+
     # Read with explicit, low-memory datatypes to save RAM on big datasets
     df = pd.read_csv(
         path,
@@ -177,6 +258,7 @@ def load_transcript_data(file_path: str) -> pd.DataFrame:
         dtype={'x': 'float32', 'y': 'float32', 'gene': 'category'}
     )
     return df
+
 
 def generate_vectorized_mock_data(file_path: str, num_molecules: int = 15000) -> None:
     """

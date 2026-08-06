@@ -4,9 +4,14 @@ import numpy as np
 import pandas as pd
 import pytest
 from scipy.sparse import csr_matrix
+from typer.testing import CliRunner
+
 from src.spatial_pipeline.binning import (
     bin_square, 
     bin_hexagonal, 
+    bin_kdtree,
+    bin_quadtree,
+    benchmark_binning_algorithms,
     get_bin_centers, 
     build_sparse_matrix,
     compute_square_bins
@@ -15,8 +20,17 @@ from src.spatial_pipeline.graphs import build_spatial_graph
 from src.spatial_pipeline.out_of_core import (
     partition_dataset_to_tiles,
     process_tile_out_of_core,
-    stitch_out_of_core_results
+    stitch_out_of_core_results,
+    profile_out_of_core_execution
 )
+from src.spatial_pipeline.io import (
+    load_transcript_arrow,
+    arrow_table_to_numpy,
+    load_transcript_data,
+    generate_vectorized_mock_data
+)
+from src.spatial_pipeline.cli import app as cli_app
+
 
 def test_bin_square():
     x = np.array([0.0, 5.0, 10.0, 14.9, 15.0])
@@ -260,3 +274,143 @@ def test_out_of_core_equivalence():
     lap_in_mem_sorted = lap_in_mem[in_mem_sort][:, in_mem_sort].toarray()
     lap_ooc_sorted = lap_ooc[ooc_sort][:, ooc_sort].toarray()
     np.testing.assert_allclose(lap_ooc_sorted, lap_in_mem_sorted)
+
+def test_edge_case_empty_frames():
+    """Verify binning and graph construction handle empty spatial frames gracefully."""
+    x = np.array([])
+    y = np.array([])
+    res = 10.0
+    
+    bin_coords_sq, offset_sq = bin_square(x, y, res)
+    assert len(bin_coords_sq) == 0
+    assert offset_sq == (0.0, 0.0)
+    
+    bin_coords_kd, offset_kd = bin_kdtree(x, y, res)
+    assert len(bin_coords_kd) == 0
+    assert offset_kd == (0.0, 0.0)
+    
+    bin_coords_qt, offset_qt = bin_quadtree(x, y, res)
+    assert len(bin_coords_qt) == 0
+    assert offset_qt == (0.0, 0.0)
+    
+    adj, lap = build_spatial_graph(bin_coords_sq, max_distance=15.0)
+    assert adj.shape == (0, 0)
+    assert lap.shape == (0, 0)
+
+def test_edge_case_extreme_coordinate_ranges():
+    """Verify handling of extreme coordinate ranges spanning 10^-9 to 10^9."""
+    x = np.array([-1e9, 0.0, 1e9])
+    y = np.array([-1e9, 0.0, 1e9])
+    res = 1000.0
+    
+    bin_coords, offset = bin_square(x, y, res)
+    assert len(bin_coords) == 3
+    assert bin_coords[0, 0] == 0
+    assert bin_coords[2, 0] == int((1e9 - (-1e9)) / res)
+
+def test_edge_case_floating_point_precision_limits():
+    """Verify sub-nanometer floating point precision handling."""
+    x = np.array([1.000000000001, 1.000000000002, 1.000000000009])
+    y = np.array([2.0, 2.0, 2.0])
+    res = 1e-12
+    
+    bin_coords, _ = bin_square(x, y, res)
+    assert len(bin_coords) == 3
+    assert bin_coords[0, 0] != bin_coords[2, 0]
+
+def test_binning_algorithms_tradeoffs_and_benchmarking():
+    """Verify correctness and benchmarking of Spatial Hashing vs KDTree vs Quadtree."""
+    x = np.array([12.0, 15.0, 25.0, 34.0, 38.0])
+    y = np.array([12.0, 15.0, 25.0, 34.0, 38.0])
+    res = 10.0
+    
+    coords_sq, _ = bin_square(x, y, res)
+    coords_kd, _ = bin_kdtree(x, y, res)
+    coords_qt, _ = bin_quadtree(x, y, res)
+    
+    np.testing.assert_array_equal(coords_sq, coords_kd)
+    np.testing.assert_array_equal(coords_sq, coords_qt)
+    
+    df_bench = benchmark_binning_algorithms(x, y, res, runs=1)
+    assert len(df_bench) == 3
+    assert "Execution Time (ms)" in df_bench.columns
+    assert "Peak Memory (MB)" in df_bench.columns
+
+
+def test_parallel_graph_construction():
+    """Verify parallel multi-threading and multi-processing graph construction equivalence."""
+    np.random.seed(42)
+    coords = np.random.uniform(0, 100, (60, 2))
+    max_dist = 20.0
+    
+    adj_single, lap_single = build_spatial_graph(coords, max_dist, n_jobs=1)
+    adj_threading, lap_threading = build_spatial_graph(coords, max_dist, n_jobs=2, backend="threading")
+    adj_multi, lap_multi = build_spatial_graph(coords, max_dist, n_jobs=2, backend="multiprocessing")
+    
+    np.testing.assert_allclose(adj_threading.toarray(), adj_single.toarray())
+    np.testing.assert_allclose(lap_threading.toarray(), lap_single.toarray())
+    np.testing.assert_allclose(adj_multi.toarray(), adj_single.toarray())
+    np.testing.assert_allclose(lap_multi.toarray(), lap_single.toarray())
+
+def test_pyarrow_zero_copy_and_io():
+    """Verify PyArrow zero-copy data transfer and ingestion."""
+    file_path = "test_arrow_mock.csv"
+    generate_vectorized_mock_data(file_path, num_molecules=1000)
+    
+    # PyArrow Table loading
+    table = load_transcript_arrow(file_path)
+    assert table.num_rows == 1000
+    assert table.column_names == ["x", "y", "gene"]
+    
+    # Zero-copy dictionary conversion
+    arr_dict = arrow_table_to_numpy(table)
+    assert len(arr_dict["x"]) == 1000
+    assert len(arr_dict["y"]) == 1000
+    assert len(arr_dict["gene"]) == 1000
+    
+    # Arrow-enabled DataFrame load
+    df_arrow = load_transcript_data(file_path, use_arrow=True)
+    assert len(df_arrow) == 1000
+    assert "x" in df_arrow.columns and "y" in df_arrow.columns
+    
+    if os.path.exists(file_path):
+        os.remove(file_path)
+
+def test_out_of_core_memory_profiling():
+    """Verify exact peak RAM memory profiling for out-of-core operations."""
+    file_path = "test_ooc_profile.csv"
+    generate_vectorized_mock_data(file_path, num_molecules=2000)
+    
+    report = profile_out_of_core_execution(
+        file_path, 
+        tile_size=100.0, 
+        resolution=20.0, 
+        max_dist=25.0,
+        partition_dir="tmp_test_part_prof",
+        tmp_out_dir="tmp_test_out_prof"
+    )
+    
+    assert "partitioning" in report
+    assert "tile_processing" in report
+    assert "stitching" in report
+    assert "summary" in report
+    assert report["summary"]["max_stage_peak_mb"] > 0
+    assert report["summary"]["total_elapsed_sec"] > 0
+    
+    if os.path.exists(file_path):
+        os.remove(file_path)
+
+def test_cli_interface():
+    """Test CLI commands run and benchmark via Typer CliRunner."""
+    runner = CliRunner()
+    
+    # Run command test
+    res_run = runner.invoke(cli_app, ["run", "--generate-mock", "--resolution", "20.0", "--n-jobs", "2"])
+    assert res_run.exit_code == 0
+    assert "Execution Summary" in res_run.stdout
+    
+    # Benchmark command test
+    res_bench = runner.invoke(cli_app, ["benchmark", "--num-molecules", "500", "--resolution", "20.0"])
+    assert res_bench.exit_code == 0
+    assert "Binning Algorithm Tradeoffs" in res_bench.stdout
+

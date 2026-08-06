@@ -1,11 +1,34 @@
 import os
 import shutil
+import time
+import tracemalloc
+from contextlib import contextmanager
 import numpy as np
 import pandas as pd
 import scipy.sparse
 from scipy.sparse import csr_matrix, coo_matrix
 from scipy.spatial import KDTree
-from typing import Tuple, List, Dict, Any
+from typing import Tuple, List, Dict, Any, Generator
+
+@contextmanager
+def profile_memory() -> Generator[Dict[str, float], None, None]:
+    """
+    Context manager to track exact peak RAM usage (in bytes and MB) during execution block.
+    """
+    tracemalloc.start()
+    t0 = time.perf_counter()
+    metrics = {"current_bytes": 0.0, "peak_bytes": 0.0, "peak_mb": 0.0, "elapsed_sec": 0.0}
+    try:
+        yield metrics
+    finally:
+        t1 = time.perf_counter()
+        current, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        metrics["current_bytes"] = float(current)
+        metrics["peak_bytes"] = float(peak)
+        metrics["peak_mb"] = float(peak / (1024.0 * 1024.0))
+        metrics["elapsed_sec"] = float(t1 - t0)
+
 
 def partition_dataset_to_tiles(file_path: str, tile_size: float, partition_dir: str) -> None:
     """
@@ -366,3 +389,88 @@ def stitch_out_of_core_results(
     laplacian_matrix = degree_matrix - adjacency_matrix
     
     return global_expression, global_centers, global_genes, adjacency_matrix, laplacian_matrix
+
+def profile_out_of_core_execution(
+    file_path: str, 
+    tile_size: float, 
+    resolution: float, 
+    max_dist: float, 
+    partition_dir: str = "tmp_partition_profile", 
+    tmp_out_dir: str = "tmp_out_profile"
+) -> Dict[str, Dict[str, float]]:
+    """
+    Profiles exact peak RAM usage (bytes and MB) and runtime across partition, 
+    tile processing, and stitching phases in out-of-core operations.
+    
+    Parameters
+    ----------
+    file_path : str
+        Path to raw transcript coordinates CSV.
+    tile_size : float
+        Tile size.
+    resolution : float
+        Binning grid resolution.
+    max_dist : float
+        Max radius distance for spatial graph neighbor connections.
+    partition_dir : str
+        Directory to store tile partitions.
+    tmp_out_dir : str
+        Directory to store intermediate tile output results.
+        
+    Returns
+    -------
+    Dict[str, Dict[str, float]]
+        Dictionary containing memory and execution time metrics for each stage and total pipeline.
+    """
+    report = {}
+    
+    # 1. Profile Partitioning Stage
+    with profile_memory() as p_stats:
+        partition_dataset_to_tiles(file_path, tile_size, partition_dir)
+    report["partitioning"] = p_stats
+    
+    # Identify tiles
+    tiles = []
+    if os.path.exists(partition_dir):
+        for f in os.listdir(partition_dir):
+            if f.startswith("tile_") and f.endswith(".csv"):
+                parts = f[5:-4].split("_")
+                tiles.append((int(parts[0]), int(parts[1])))
+                
+    # 2. Profile Tile Processing Stage
+    with profile_memory() as proc_stats:
+        for tx, ty in tiles:
+            process_tile_out_of_core(tx, ty, tile_size, resolution, max_dist, partition_dir, tmp_out_dir)
+    report["tile_processing"] = proc_stats
+    
+    # 3. Profile Stitching Stage
+    with profile_memory() as stitch_stats:
+        _ = stitch_out_of_core_results(tmp_out_dir, resolution)
+    report["stitching"] = stitch_stats
+    
+    # Compute overall peak memory and total elapsed time
+    report["summary"] = {
+        "num_tiles": float(len(tiles)),
+        "max_stage_peak_mb": max(
+            p_stats["peak_mb"], 
+            proc_stats["peak_mb"], 
+            stitch_stats["peak_mb"]
+        ),
+        "total_elapsed_sec": (
+            p_stats["elapsed_sec"] + 
+            proc_stats["elapsed_sec"] + 
+            stitch_stats["elapsed_sec"]
+        )
+    }
+    
+    # Cleanup temporary directories
+    try:
+        if os.path.exists(partition_dir):
+            shutil.rmtree(partition_dir)
+        if os.path.exists(tmp_out_dir):
+            shutil.rmtree(tmp_out_dir)
+    except OSError:
+        pass
+        
+    return report
+

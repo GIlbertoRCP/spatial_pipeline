@@ -1,11 +1,14 @@
+import time
+import tracemalloc
 import numpy as np
 import pandas as pd
 from scipy.sparse import coo_matrix, csr_matrix, csc_matrix
-from typing import Tuple, Dict, Any, Union
+from scipy.spatial import KDTree
+from typing import Tuple, Dict, Any, Union, List
 
 def bin_square(x: np.ndarray, y: np.ndarray, resolution: float) -> Tuple[np.ndarray, Tuple[float, float]]:
     """
-    Bins 2D points into a square grid of a given side length (resolution).
+    Bins 2D points into a square grid of a given side length (resolution) via spatial hashing.
     
     Parameters
     ----------
@@ -23,13 +26,21 @@ def bin_square(x: np.ndarray, y: np.ndarray, resolution: float) -> Tuple[np.ndar
     offset : Tuple[float, float]
         The minimum x and y coordinates used to offset the binning.
     """
+    x = np.asarray(x)
+    y = np.asarray(y)
+    
+    if len(x) == 0:
+        return np.empty((0, 2), dtype=int), (0.0, 0.0)
+        
     x_min = float(np.min(x))
     y_min = float(np.min(y))
     
-    bin_x = np.floor((x - x_min) / resolution).astype(int)
-    bin_y = np.floor((y - y_min) / resolution).astype(int)
+    # Use float64 arithmetic to preserve precision on extreme ranges/sub-nanometer values
+    bin_x = np.floor((x.astype(np.float64) - x_min) / float(resolution)).astype(int)
+    bin_y = np.floor((y.astype(np.float64) - y_min) / float(resolution)).astype(int)
     
     return np.column_stack((bin_x, bin_y)), (x_min, y_min)
+
 
 def bin_hexagonal(x: np.ndarray, y: np.ndarray, resolution: float) -> np.ndarray:
     """
@@ -82,6 +93,189 @@ def bin_hexagonal(x: np.ndarray, y: np.ndarray, resolution: float) -> np.ndarray
     r_round = np.where(mask_r, -q_round - s_round, r_round)
     
     return np.column_stack((q_round, r_round))
+
+def bin_kdtree(x: np.ndarray, y: np.ndarray, resolution: float) -> Tuple[np.ndarray, Tuple[float, float]]:
+    """
+    Bins 2D points into a grid by searching nearest spatial grid centers using a KD-Tree.
+    
+    Parameters
+    ----------
+    x : np.ndarray
+        1D array of x coordinates.
+    y : np.ndarray
+        1D array of y coordinates.
+    resolution : float
+        Side length of each square bin.
+        
+    Returns
+    -------
+    bin_coords : np.ndarray
+        2D array of shape (N, 2) containing integer grid indices (bin_x, bin_y).
+    offset : Tuple[float, float]
+        The minimum x and y coordinates used to offset the binning.
+    """
+    x = np.asarray(x)
+    y = np.asarray(y)
+    if len(x) == 0:
+        return np.empty((0, 2), dtype=int), (0.0, 0.0)
+        
+    x_min = float(np.min(x))
+    y_min = float(np.min(y))
+    
+    # Calculate target spatial hashing grid bounds
+    bin_x_approx = np.floor((x - x_min) / resolution).astype(int)
+    bin_y_approx = np.floor((y - y_min) / resolution).astype(int)
+    
+    # Unique active bin grid indices
+    active_grid = np.unique(np.column_stack((bin_x_approx, bin_y_approx)), axis=0)
+    
+    # Center coordinates of active bins
+    centers = np.column_stack((
+        x_min + (active_grid[:, 0] + 0.5) * resolution,
+        y_min + (active_grid[:, 1] + 0.5) * resolution
+    ))
+    
+    # Query KDTree for exact nearest center match
+    tree = KDTree(centers)
+    points = np.column_stack((x, y))
+    _, indices = tree.query(points)
+    
+    return active_grid[indices], (x_min, y_min)
+
+def bin_quadtree(
+    x: np.ndarray, 
+    y: np.ndarray, 
+    resolution: float, 
+    max_depth: int = 10
+) -> Tuple[np.ndarray, Tuple[float, float]]:
+    """
+    Bins 2D points into a spatial grid using recursive Quadtree decomposition.
+    
+    Parameters
+    ----------
+    x : np.ndarray
+        1D array of x coordinates.
+    y : np.ndarray
+        1D array of y coordinates.
+    resolution : float
+        Target cell size threshold for leaf nodes.
+    max_depth : int, default 10
+        Maximum recursion depth of the Quadtree.
+        
+    Returns
+    -------
+    bin_coords : np.ndarray
+        2D array of shape (N, 2) containing integer grid indices (bin_x, bin_y).
+    offset : Tuple[float, float]
+        The minimum x and y coordinates used to offset the binning.
+    """
+    x = np.asarray(x)
+    y = np.asarray(y)
+    if len(x) == 0:
+        return np.empty((0, 2), dtype=int), (0.0, 0.0)
+        
+    x_min = float(np.min(x))
+    y_min = float(np.min(y))
+    x_max = float(np.max(x)) + 1e-6
+    y_max = float(np.max(y)) + 1e-6
+    
+    points = np.column_stack((x, y))
+    bin_coords = np.zeros((len(x), 2), dtype=int)
+    
+    def _split_node(indices: np.ndarray, bbox: Tuple[float, float, float, float], depth: int):
+        if len(indices) == 0:
+            return
+        bx_min, bx_max, by_min, by_max = bbox
+        width = bx_max - bx_min
+        height = by_max - by_min
+        
+        if width <= resolution or height <= resolution or depth >= max_depth:
+            # Leaf node assignment
+            bx = np.floor((points[indices, 0] - x_min) / resolution).astype(int)
+            by = np.floor((points[indices, 1] - y_min) / resolution).astype(int)
+            bin_coords[indices] = np.column_stack((bx, by))
+            return
+            
+        mid_x = (bx_min + bx_max) / 2.0
+        mid_y = (by_min + by_max) / 2.0
+        
+        p = points[indices]
+        q0 = indices[(p[:, 0] < mid_x) & (p[:, 1] < mid_y)]
+        q1 = indices[(p[:, 0] >= mid_x) & (p[:, 1] < mid_y)]
+        q2 = indices[(p[:, 0] < mid_x) & (p[:, 1] >= mid_y)]
+        q3 = indices[(p[:, 0] >= mid_x) & (p[:, 1] >= mid_y)]
+        
+        _split_node(q0, (bx_min, mid_x, by_min, mid_y), depth + 1)
+        _split_node(q1, (mid_x, bx_max, by_min, mid_y), depth + 1)
+        _split_node(q2, (bx_min, mid_x, mid_y, by_max), depth + 1)
+        _split_node(q3, (mid_x, bx_max, mid_y, by_max), depth + 1)
+        
+    _split_node(np.arange(len(x)), (x_min, x_max, y_min, y_max), 0)
+    return bin_coords, (x_min, y_min)
+
+def benchmark_binning_algorithms(
+    x: np.ndarray, 
+    y: np.ndarray, 
+    resolution: float, 
+    runs: int = 3
+) -> pd.DataFrame:
+    """
+    Compares speed and memory tradeoffs between Spatial Hashing, KD-Tree, and Quadtree binning algorithms.
+    
+    Parameters
+    ----------
+    x : np.ndarray
+        1D array of x coordinates.
+    y : np.ndarray
+        1D array of y coordinates.
+    resolution : float
+        Bin resolution size.
+    runs : int, default 3
+        Number of benchmark repetitions for averaging.
+        
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame summarizing execution time (ms) and peak memory usage (MB) for each algorithm.
+    """
+    algorithms = {
+        "Spatial Hashing (Grid)": lambda: bin_square(x, y, resolution),
+        "KD-Tree Query": lambda: bin_kdtree(x, y, resolution),
+        "Quadtree Decomposition": lambda: bin_quadtree(x, y, resolution)
+    }
+    
+    results = []
+    for name, func in algorithms.items():
+        times = []
+        peak_mems = []
+        for _ in range(runs):
+            tracemalloc.start()
+            t0 = time.perf_counter()
+            _ = func()
+            t1 = time.perf_counter()
+            _, peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+            
+            times.append((t1 - t0) * 1000.0)  # ms
+            peak_mems.append(peak / (1024.0 * 1024.0))  # MB
+            
+        avg_time = np.mean(times)
+        avg_peak_mem = np.mean(peak_mems)
+        results.append({
+            "Algorithm": name,
+            "Execution Time (ms)": round(float(avg_time), 3),
+            "Peak Memory (MB)": round(float(avg_peak_mem), 4)
+        })
+        
+    df_res = pd.DataFrame(results)
+    baseline_time = df_res.loc[0, "Execution Time (ms)"]
+    if baseline_time > 0:
+        df_res["Relative Speedup"] = (baseline_time / df_res["Execution Time (ms)"]).round(2)
+    else:
+        df_res["Relative Speedup"] = 1.0
+        
+    return df_res
+
 
 def get_bin_centers(
     unique_bins: np.ndarray, 
