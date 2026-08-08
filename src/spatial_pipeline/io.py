@@ -1,10 +1,11 @@
 import os
-import zipfile
 import urllib.request
-import pandas as pd
-import numpy as np
+import zipfile
 from pathlib import Path
-from typing import Dict, Any, Union
+from typing import Any
+
+import numpy as np
+import pandas as pd
 
 try:
     import polars as pl
@@ -19,6 +20,13 @@ try:
     HAS_PYARROW = True
 except ImportError:
     HAS_PYARROW = False
+
+try:
+    import anndata as ad
+    HAS_ANNDATA = True
+except ImportError:
+    HAS_ANNDATA = False
+
 
 
 def download_dataset(url: str, output_dir: str) -> str:
@@ -207,7 +215,7 @@ def load_transcript_arrow(file_path: str) -> "pa.Table":
         table = pa_csv.read_csv(str_path, convert_options=convert_options)
     return table
 
-def arrow_table_to_numpy(table: "pa.Table") -> Dict[str, np.ndarray]:
+def arrow_table_to_numpy(table: "pa.Table") -> dict[str, np.ndarray]:
     """
     Converts PyArrow Table columns into NumPy arrays using zero-copy memory transfers where possible.
     
@@ -306,3 +314,113 @@ def generate_vectorized_mock_data(file_path: str, num_molecules: int = 15000) ->
     
     df.to_csv(file_path, index=False)
     print(f"[+] Vectorized mock dataset saved to: {file_path}")
+
+def to_anndata(
+    sparse_counts: Any,
+    bin_coords: np.ndarray,
+    genes: np.ndarray = None,
+    adjacency_matrix: Any = None,
+    laplacian_matrix: Any = None,
+    compute_svg: bool = False,
+    metadata: dict[str, Any] | None = None
+) -> "ad.AnnData":
+    """
+    Exports spatial binning count matrix, spatial coordinates, and adjacency graphs 
+    into an AnnData object following Scanpy and Squidpy ecosystem conventions.
+    
+    Parameters
+    ----------
+    sparse_counts : scipy.sparse matrix
+        Binned gene expression counts matrix of shape (num_bins, num_genes).
+    bin_coords : np.ndarray
+        Array of shape (num_bins, 2) holding Cartesian (x, y) coordinates of bin centers.
+    genes : np.ndarray, optional
+        1D array of gene names (length num_genes).
+    adjacency_matrix : scipy.sparse matrix, optional
+        Spatial adjacency graph matrix of shape (num_bins, num_bins). Stored in `obsp['spatial_connectivities']`.
+    laplacian_matrix : scipy.sparse matrix, optional
+        Graph Laplacian matrix of shape (num_bins, num_bins). Stored in `obsp['spatial_laplacian']`.
+    compute_svg : bool, default False
+        If True and adjacency_matrix is provided, calculates Moran's I & Geary's C spatial autocorrelation metrics
+        and stores them in `var['morans_i']`, `var['gearys_c']`, and `var['morans_pvalue']`.
+    metadata : Dict[str, Any], optional
+        Pipeline metadata stored in `uns['spatial_pipeline']`.
+        
+    Returns
+    -------
+    ad.AnnData
+        AnnData object ready for Scanpy / Squidpy downstream analysis.
+    """
+    if not HAS_ANNDATA:
+        raise ImportError("anndata package is required. Install with `pip install anndata`.")
+        
+    adata = ad.AnnData(X=sparse_counts)
+    adata.obsm['spatial'] = np.asarray(bin_coords)
+    
+    if genes is not None:
+        adata.var_names = np.asarray(genes).astype(str)
+        
+    if adjacency_matrix is not None:
+        adata.obsp['spatial_connectivities'] = adjacency_matrix
+        
+        if compute_svg:
+            from .graphs import compute_gearys_c, compute_morans_i
+            morans_i, _, p_values = compute_morans_i(sparse_counts, adjacency_matrix)
+            gearys_c = compute_gearys_c(sparse_counts, adjacency_matrix)
+            adata.var['morans_i'] = morans_i
+            adata.var['gearys_c'] = gearys_c
+            adata.var['morans_pvalue'] = p_values
+        
+    if laplacian_matrix is not None:
+        adata.obsp['spatial_laplacian'] = laplacian_matrix
+        
+    if metadata is not None:
+        adata.uns['spatial_pipeline'] = metadata
+    else:
+        adata.uns['spatial_pipeline'] = {"version": "0.2.0"}
+        
+    return adata
+
+def from_anndata(adata: "ad.AnnData") -> dict[str, Any]:
+    """
+    Extracts sparse count matrix, spatial coordinates, gene names, and adjacency graphs from an AnnData object.
+    
+    Parameters
+    ----------
+    adata : ad.AnnData
+        Input AnnData object.
+        
+    Returns
+    -------
+    Dict[str, Any]
+        Dictionary containing 'counts', 'bin_coords', 'genes', 'adjacency_matrix', and 'laplacian_matrix'.
+    """
+    if not HAS_ANNDATA:
+        raise ImportError("anndata package is required.")
+        
+    counts = adata.X
+    bin_coords = adata.obsm.get('spatial', np.empty((adata.n_obs, 2)))
+    genes = np.array(adata.var_names)
+    adjacency = adata.obsp.get('spatial_connectivities', None)
+    laplacian = adata.obsp.get('spatial_laplacian', None)
+    
+    return {
+        "counts": counts,
+        "bin_coords": bin_coords,
+        "genes": genes,
+        "adjacency_matrix": adjacency,
+        "laplacian_matrix": laplacian
+    }
+
+def save_anndata(adata: "ad.AnnData", file_path: str) -> None:
+    """Saves AnnData object to disk as an HDF5 .h5ad file."""
+    if not HAS_ANNDATA:
+        raise ImportError("anndata package is required.")
+    adata.write_h5ad(file_path)
+
+def read_anndata(file_path: str) -> "ad.AnnData":
+    """Reads an AnnData .h5ad file from disk."""
+    if not HAS_ANNDATA:
+        raise ImportError("anndata package is required.")
+    return ad.read_h5ad(file_path)
+

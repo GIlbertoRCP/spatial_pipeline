@@ -1,17 +1,70 @@
 import os
 import shutil
+import sys
 import time
 import tracemalloc
+from collections.abc import Generator
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import contextmanager
+
 import numpy as np
 import pandas as pd
 import scipy.sparse
-from scipy.sparse import csr_matrix, coo_matrix
+from scipy.sparse import coo_matrix, csr_matrix
 from scipy.spatial import KDTree
-from typing import Tuple, List, Dict, Any, Generator
+
+try:
+    import resource
+except ImportError:
+    resource = None
+
+
+def check_memory_limit(limit_mb: float | None = None) -> None:
+    """
+    Checks current traced RAM usage against specified limit_mb (in Megabytes).
+    If limit_mb is provided and memory exceeds limit, raises MemoryError.
+    """
+    if limit_mb is None or limit_mb <= 0:
+        return
+    current_bytes, peak_bytes = tracemalloc.get_traced_memory()
+    peak_mb = peak_bytes / (1024.0 * 1024.0)
+    if peak_mb > limit_mb:
+        raise MemoryError(
+            f"Strict memory limit exceeded: Peak allocated RAM is {peak_mb:.2f} MB, "
+            f"which exceeds artificial limit of {limit_mb:.2f} MB."
+        )
+
 
 @contextmanager
-def profile_memory() -> Generator[Dict[str, float], None, None]:
+def enforce_memory_limit(limit_mb: float | None = None) -> Generator[None, None, None]:
+    """
+    Context manager enforcing artificial memory limit on Linux (via resource.setrlimit)
+    and cross-platform via tracemalloc monitoring.
+    """
+    old_limit = None
+    if limit_mb is not None and limit_mb > 0:
+        bytes_limit = int(limit_mb * 1024 * 1024)
+        if resource is not None and hasattr(resource, 'RLIMIT_AS'):
+            try:
+                soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+                old_limit = (soft, hard)
+                resource.setrlimit(resource.RLIMIT_AS, (bytes_limit, hard))
+            except Exception:
+                pass
+    try:
+        yield
+    finally:
+        if old_limit is not None and resource is not None and hasattr(resource, 'RLIMIT_AS'):
+            try:
+                resource.setrlimit(resource.RLIMIT_AS, old_limit)
+            except Exception:
+                pass
+        if limit_mb is not None:
+            check_memory_limit(limit_mb)
+
+
+@contextmanager
+def profile_memory() -> Generator[dict[str, float], None, None]:
     """
     Context manager to track exact peak RAM usage (in bytes and MB) during execution block.
     """
@@ -30,6 +83,7 @@ def profile_memory() -> Generator[Dict[str, float], None, None]:
         metrics["elapsed_sec"] = float(t1 - t0)
 
 
+
 def partition_dataset_to_tiles(file_path: str, tile_size: float, partition_dir: str) -> None:
     """
     Partitions a large spatial transcriptomics CSV file into spatial tiles on disk.
@@ -46,7 +100,7 @@ def partition_dataset_to_tiles(file_path: str, tile_size: float, partition_dir: 
     if os.path.exists(partition_dir):
         # Clean existing CSV partitions to prevent appending to stale data
         for f in os.listdir(partition_dir):
-            if f.endswith(".csv") or f.endswith(".npy"):
+            if f.endswith((".csv", ".npy")):
                 try:
                     os.remove(os.path.join(partition_dir, f))
                 except OSError:
@@ -85,7 +139,8 @@ def partition_dataset_to_tiles(file_path: str, tile_size: float, partition_dir: 
             )
             
     # Save global offset and gene list to the partition directory
-    global_genes = np.array(sorted(list(global_genes_set)))
+    global_genes = np.array(sorted(global_genes_set))
+
     np.save(os.path.join(partition_dir, "genes.npy"), global_genes)
     np.save(os.path.join(partition_dir, "offset.npy"), np.array([x_min, y_min]))
     
@@ -281,7 +336,7 @@ def process_tile_out_of_core(
 def stitch_out_of_core_results(
     tmp_out_dir: str, 
     resolution: float
-) -> Tuple[csr_matrix, np.ndarray, np.ndarray, csr_matrix, csr_matrix]:
+) -> tuple[csr_matrix, np.ndarray, np.ndarray, csr_matrix, csr_matrix]:
     """
     Stitches disjoint count matrices, coordinates, and boundary edges from disk,
     resolving cross-boundary neighbors and returning stitched global matrices.
@@ -390,63 +445,89 @@ def stitch_out_of_core_results(
     
     return global_expression, global_centers, global_genes, adjacency_matrix, laplacian_matrix
 
+def _process_single_tile_wrapper(args: tuple[int, int, float, float, float, str, str]) -> None:
+    """Helper worker for multi-processing spatial tile out-of-core pipeline."""
+    tx, ty, tile_size, resolution, max_dist, partition_dir, tmp_out_dir = args
+    process_tile_out_of_core(tx, ty, tile_size, resolution, max_dist, partition_dir, tmp_out_dir)
+
+
+def process_tiles_parallel_out_of_core(
+    tiles: list[tuple[int, int]],
+    tile_size: float,
+    resolution: float,
+    max_dist: float,
+    partition_dir: str,
+    tmp_out_dir: str,
+    n_jobs: int = -1
+) -> None:
+    """
+    Processes spatial tiles concurrently using Python ProcessPoolExecutor worker pools,
+    bypassing GIL limitations for CPU-bound spatial sub-graph construction.
+    """
+    if n_jobs == -1:
+        n_jobs = os.cpu_count() or 1
+    n_jobs = max(1, int(n_jobs))
+
+    if n_jobs == 1 or len(tiles) <= 1:
+        for tx, ty in tiles:
+            process_tile_out_of_core(tx, ty, tile_size, resolution, max_dist, partition_dir, tmp_out_dir)
+    else:
+        tasks = [
+            (tx, ty, tile_size, resolution, max_dist, partition_dir, tmp_out_dir)
+            for tx, ty in tiles
+        ]
+        try:
+            with ProcessPoolExecutor(max_workers=n_jobs) as executor:
+                list(executor.map(_process_single_tile_wrapper, tasks))
+        except (RuntimeError, OSError, TypeError):
+            with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+                list(executor.map(_process_single_tile_wrapper, tasks))
+
+
 def profile_out_of_core_execution(
     file_path: str, 
     tile_size: float, 
     resolution: float, 
     max_dist: float, 
     partition_dir: str = "tmp_partition_profile", 
-    tmp_out_dir: str = "tmp_out_profile"
-) -> Dict[str, Dict[str, float]]:
+    tmp_out_dir: str = "tmp_out_profile",
+    n_jobs: int = -1,
+    limit_mb: float | None = None
+) -> dict[str, dict[str, float]]:
     """
     Profiles exact peak RAM usage (bytes and MB) and runtime across partition, 
     tile processing, and stitching phases in out-of-core operations.
-    
-    Parameters
-    ----------
-    file_path : str
-        Path to raw transcript coordinates CSV.
-    tile_size : float
-        Tile size.
-    resolution : float
-        Binning grid resolution.
-    max_dist : float
-        Max radius distance for spatial graph neighbor connections.
-    partition_dir : str
-        Directory to store tile partitions.
-    tmp_out_dir : str
-        Directory to store intermediate tile output results.
-        
-    Returns
-    -------
-    Dict[str, Dict[str, float]]
-        Dictionary containing memory and execution time metrics for each stage and total pipeline.
+    Supports memory enforcement limit_mb and worker pool n_jobs.
     """
     report = {}
+    partition_dir = os.path.abspath(partition_dir)
+    tmp_out_dir = os.path.abspath(tmp_out_dir)
     
-    # 1. Profile Partitioning Stage
-    with profile_memory() as p_stats:
-        partition_dataset_to_tiles(file_path, tile_size, partition_dir)
-    report["partitioning"] = p_stats
-    
-    # Identify tiles
-    tiles = []
-    if os.path.exists(partition_dir):
-        for f in os.listdir(partition_dir):
-            if f.startswith("tile_") and f.endswith(".csv"):
-                parts = f[5:-4].split("_")
-                tiles.append((int(parts[0]), int(parts[1])))
-                
-    # 2. Profile Tile Processing Stage
-    with profile_memory() as proc_stats:
-        for tx, ty in tiles:
-            process_tile_out_of_core(tx, ty, tile_size, resolution, max_dist, partition_dir, tmp_out_dir)
-    report["tile_processing"] = proc_stats
-    
-    # 3. Profile Stitching Stage
-    with profile_memory() as stitch_stats:
-        _ = stitch_out_of_core_results(tmp_out_dir, resolution)
-    report["stitching"] = stitch_stats
+    with enforce_memory_limit(limit_mb):
+        # 1. Profile Partitioning Stage
+        with profile_memory() as p_stats:
+            partition_dataset_to_tiles(file_path, tile_size, partition_dir)
+        report["partitioning"] = p_stats
+        
+        # Identify tiles
+        tiles = []
+        if os.path.exists(partition_dir):
+            for f in os.listdir(partition_dir):
+                if f.startswith("tile_") and f.endswith(".csv"):
+                    parts = f[5:-4].split("_")
+                    tiles.append((int(parts[0]), int(parts[1])))
+                    
+        # 2. Profile Tile Processing Stage
+        with profile_memory() as proc_stats:
+            process_tiles_parallel_out_of_core(
+                tiles, tile_size, resolution, max_dist, partition_dir, tmp_out_dir, n_jobs=n_jobs
+            )
+        report["tile_processing"] = proc_stats
+        
+        # 3. Profile Stitching Stage
+        with profile_memory() as stitch_stats:
+            _ = stitch_out_of_core_results(tmp_out_dir, resolution)
+        report["stitching"] = stitch_stats
     
     # Compute overall peak memory and total elapsed time
     report["summary"] = {
@@ -473,4 +554,5 @@ def profile_out_of_core_execution(
         pass
         
     return report
+
 

@@ -1,13 +1,12 @@
 import os
+
 import typer
-import pandas as pd
-import numpy as np
 from rich.console import Console
 from rich.table import Table
 
-from spatial_pipeline.io import load_transcript_data, generate_vectorized_mock_data
-from spatial_pipeline.binning import compute_square_bins, benchmark_binning_algorithms
-from spatial_pipeline.graphs import build_spatial_graph
+from spatial_pipeline.binning import benchmark_binning_algorithms, compute_square_bins
+from spatial_pipeline.graphs import build_spatial_graph, compute_spatially_variable_genes
+from spatial_pipeline.io import generate_vectorized_mock_data, load_transcript_data, save_anndata, to_anndata
 from spatial_pipeline.out_of_core import profile_out_of_core_execution
 
 app = typer.Typer(
@@ -55,6 +54,99 @@ def run(
     table.add_row("Graph Non-Zero Edges", str(adj.nnz))
     table.add_row("Laplacian Matrix Shape", str(laplacian.shape))
     console.print(table)
+
+@app.command()
+def svg(
+    input: str = typer.Option(None, "--input", "-i", help="Path to transcript CSV file"),
+    resolution: float = typer.Option(10.0, "--resolution", "-r", help="Spatial grid resolution size"),
+    max_dist: float = typer.Option(15.0, "--max-dist", "-m", help="Maximum radius distance for adjacency graph"),
+    top_n: int = typer.Option(10, "--top-n", "-n", help="Number of top spatially variable genes to display"),
+    output: str = typer.Option(None, "--output", "-o", help="Optional CSV output file path for SVG results")
+):
+    """
+    Compute Spatially Variable Genes (SVGs) via Moran's I & Geary's C spatial autocorrelation.
+    """
+    input_file = input
+    if not input_file:
+        input_file = "mock_transcripts.csv"
+        if not os.path.exists(input_file):
+            generate_vectorized_mock_data(input_file)
+            
+    console.print(f"[bold blue][*] Loading dataset for SVG calculation: {input_file}...[/bold blue]")
+    df = load_transcript_data(input_file)
+    sparse_counts, bin_coords = compute_square_bins(df, resolution)
+    gene_list = df['gene'].cat.categories.to_numpy()
+    
+    adj, _ = build_spatial_graph(bin_coords, max_dist)
+    svg_df = compute_spatially_variable_genes(sparse_counts, gene_list, adj, top_n=top_n)
+    
+    table = Table(title=f"Top {top_n} Spatially Variable Genes (Moran's I)", show_header=True, header_style="bold green")
+    table.add_column("Rank", style="dim")
+    table.add_column("Gene", style="bold cyan")
+    table.add_column("Moran's I")
+    table.add_column("Geary's C")
+    table.add_column("z-Score")
+    table.add_column("FDR p-val")
+    
+    for rank, row in enumerate(svg_df.itertuples(), start=1):
+        table.add_row(
+            str(rank),
+            str(row.gene),
+            f"{row.morans_i:.4f}",
+            f"{row.gearys_c:.4f}",
+            f"{row.z_score:.2f}",
+            f"{row.fdr_p_value:.2e}"
+        )
+    console.print(table)
+    
+    if output:
+        svg_df.to_csv(output, index=False)
+        console.print(f"[bold green][+] Exported SVG table to: {output}[/bold green]")
+
+@app.command()
+def export(
+    input: str = typer.Option(..., "--input", "-i", help="Path to input transcript CSV file"),
+    output: str = typer.Option("spatial_processed.h5ad", "--output", "-o", help="Output .h5ad file path"),
+    resolution: float = typer.Option(10.0, "--resolution", "-r", help="Spatial grid resolution size"),
+    max_dist: float = typer.Option(15.0, "--max-dist", "-m", help="Maximum radius distance for adjacency graph"),
+    compute_svg: bool = typer.Option(True, "--svg/--no-svg", help="Compute Moran's I & Geary's C into AnnData .var")
+):
+    """
+    Process transcripts CSV and export directly to AnnData .h5ad format.
+    """
+    console.print(f"[bold blue][*] Loading dataset: {input}...[/bold blue]")
+    df = load_transcript_data(input)
+    sparse_counts, bin_coords = compute_square_bins(df, resolution)
+    gene_list = df['gene'].cat.categories.to_numpy()
+    
+    console.print("[bold blue][*] Building spatial adjacency graph...[/bold blue]")
+    adj, laplacian = build_spatial_graph(bin_coords, max_dist)
+    
+    console.print("[bold blue][*] Converting to AnnData object...[/bold blue]")
+    adata = to_anndata(
+        sparse_counts=sparse_counts,
+        bin_coords=bin_coords,
+        genes=gene_list,
+        adjacency_matrix=adj,
+        laplacian_matrix=laplacian,
+        compute_svg=compute_svg
+    )
+    
+    save_anndata(adata, output)
+    console.print(f"[bold green][+] Successfully exported AnnData to: {output}[/bold green]")
+
+@app.command()
+def ui():
+    """
+    Launch the Streamlit Spatial Transcriptomics Interactive Dashboard.
+    """
+    import subprocess
+    import sys
+    app_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "app.py")
+    if not os.path.exists(app_path):
+        app_path = "app.py"
+    console.print(f"[bold green][*] Launching Streamlit dashboard from {app_path}...[/bold green]")
+    subprocess.run([sys.executable, "-m", "streamlit", "run", app_path])
 
 @app.command()
 def benchmark(
@@ -108,3 +200,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

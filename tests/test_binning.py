@@ -11,12 +11,17 @@ from src.spatial_pipeline.binning import (
     bin_hexagonal, 
     bin_kdtree,
     bin_quadtree,
+    bin_voronoi,
     benchmark_binning_algorithms,
     get_bin_centers, 
     build_sparse_matrix,
     compute_square_bins
 )
-from src.spatial_pipeline.graphs import build_spatial_graph
+from src.spatial_pipeline.graphs import (
+    build_spatial_graph,
+    to_pyg_data,
+    compute_laplacian_spectrum
+)
 from src.spatial_pipeline.out_of_core import (
     partition_dataset_to_tiles,
     process_tile_out_of_core,
@@ -27,8 +32,14 @@ from src.spatial_pipeline.io import (
     load_transcript_arrow,
     arrow_table_to_numpy,
     load_transcript_data,
-    generate_vectorized_mock_data
+    generate_vectorized_mock_data,
+    to_anndata,
+    from_anndata,
+    save_anndata,
+    read_anndata,
+    HAS_ANNDATA
 )
+
 from src.spatial_pipeline.cli import app as cli_app
 
 
@@ -332,7 +343,7 @@ def test_binning_algorithms_tradeoffs_and_benchmarking():
     np.testing.assert_array_equal(coords_sq, coords_qt)
     
     df_bench = benchmark_binning_algorithms(x, y, res, runs=1)
-    assert len(df_bench) == 3
+    assert len(df_bench) >= 3
     assert "Execution Time (ms)" in df_bench.columns
     assert "Peak Memory (MB)" in df_bench.columns
 
@@ -413,4 +424,112 @@ def test_cli_interface():
     res_bench = runner.invoke(cli_app, ["benchmark", "--num-molecules", "500", "--resolution", "20.0"])
     assert res_bench.exit_code == 0
     assert "Binning Algorithm Tradeoffs" in res_bench.stdout
+
+def test_anndata_ecosystem_interop():
+    """Verify AnnData (.h5ad) export and import functions."""
+    if not HAS_ANNDATA:
+        pytest.skip("anndata package is not installed.")
+        
+    np.random.seed(42)
+    mock_data = pd.DataFrame({
+        'x': [10.0, 15.0, 20.0, 25.0],
+        'y': [10.0, 15.0, 20.0, 25.0],
+        'gene': pd.Series(['GeneA', 'GeneB', 'GeneA', 'GeneB'], dtype='category')
+    })
+    sparse_counts, bin_coords = compute_square_bins(mock_data, resolution=10.0)
+    adj_matrix, laplacian_matrix = build_spatial_graph(bin_coords, max_distance=15.0)
+    genes = np.array(['GeneA', 'GeneB'])
+    
+    # 1. Create AnnData
+    adata = to_anndata(
+        sparse_counts, 
+        bin_coords, 
+        genes=genes, 
+        adjacency_matrix=adj_matrix, 
+        laplacian_matrix=laplacian_matrix
+    )
+    
+    assert adata.n_obs == len(bin_coords)
+    assert adata.n_vars == len(genes)
+    assert 'spatial' in adata.obsm
+    assert 'spatial_connectivities' in adata.obsp
+    assert 'spatial_laplacian' in adata.obsp
+    
+    # 2. Reconstruct from AnnData
+    extracted = from_anndata(adata)
+    np.testing.assert_allclose(extracted['bin_coords'], bin_coords)
+    np.testing.assert_array_equal(extracted['genes'], genes)
+    
+    # 3. Save and read .h5ad file
+    h5ad_file = "test_spatial_anndata.h5ad"
+    save_anndata(adata, h5ad_file)
+    assert os.path.exists(h5ad_file)
+    
+    read_adata = read_anndata(h5ad_file)
+    assert read_adata.n_obs == adata.n_obs
+    assert 'spatial_connectivities' in read_adata.obsp
+    
+    if os.path.exists(h5ad_file):
+        os.remove(h5ad_file)
+
+def test_adaptive_voronoi_binning():
+    """Verify adaptive Voronoi spatial binning."""
+    np.random.seed(42)
+    x = np.random.uniform(0, 100, 50)
+    y = np.random.uniform(0, 100, 50)
+    
+    bin_indices, offset, seeds = bin_voronoi(x, y, num_bins=10)
+    assert len(bin_indices) == 50
+    assert len(seeds) == 10
+    assert len(set(bin_indices)) <= 10
+
+def test_min_counts_thresholding():
+    """Verify transcript count thresholding for noise bin elimination."""
+    mock_data = pd.DataFrame({
+        'x': [10.0, 10.0, 10.0, 90.0],
+        'y': [10.0, 10.0, 10.0, 90.0],
+        'gene': pd.Series(['GeneA', 'GeneA', 'GeneB', 'GeneA'], dtype='category')
+    })
+    
+    # min_counts = 1 -> keeps both bins
+    sparse_1, coords_1 = compute_square_bins(mock_data, resolution=10.0, min_counts=1)
+    assert len(coords_1) == 2
+    
+    # min_counts = 2 -> keeps only the bin at (10, 10) which has 3 counts
+    sparse_2, coords_2 = compute_square_bins(mock_data, resolution=10.0, min_counts=2)
+    assert len(coords_2) == 1
+
+def test_pyg_data_export():
+    """Verify PyTorch Geometric (PyG) format data export."""
+    mock_data = pd.DataFrame({
+        'x': [10.0, 20.0, 30.0],
+        'y': [10.0, 20.0, 30.0],
+        'gene': pd.Series(['GeneA', 'GeneB', 'GeneA'], dtype='category')
+    })
+    sparse_counts, bin_coords = compute_square_bins(mock_data, resolution=15.0)
+    adj_matrix, _ = build_spatial_graph(bin_coords, max_distance=20.0)
+    
+    pyg_obj = to_pyg_data(sparse_counts, bin_coords, adj_matrix)
+    if isinstance(pyg_obj, dict):
+        assert "x" in pyg_obj
+        assert "pos" in pyg_obj
+        assert "edge_index" in pyg_obj
+    else:
+        assert hasattr(pyg_obj, "x")
+        assert hasattr(pyg_obj, "pos")
+        assert hasattr(pyg_obj, "edge_index")
+
+def test_graph_laplacian_spectral_analysis():
+    """Verify Graph Laplacian eigenvalue spectrum computation."""
+    bin_coords = np.array([
+        [0.0, 0.0],
+        [10.0, 0.0],
+        [0.0, 10.0],
+        [10.0, 10.0]
+    ])
+    _, laplacian_matrix = build_spatial_graph(bin_coords, max_distance=15.0)
+    evals = compute_laplacian_spectrum(laplacian_matrix, k=3)
+    assert len(evals) == 3
+    assert np.all(evals >= -1e-5)
+
 
