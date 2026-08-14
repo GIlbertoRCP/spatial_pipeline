@@ -3,13 +3,55 @@ import pytest
 from scipy.sparse import csr_matrix
 
 from spatial_pipeline.graphs import (
+    build_knn_graph,
     build_spatial_graph,
     compute_gearys_c,
     compute_laplacian_spectrum,
     compute_morans_i,
     compute_spatially_variable_genes,
+    is_gpu_available,
     to_pyg_data,
 )
+
+
+def test_is_gpu_available():
+    # Calling is_gpu_available should return a boolean without crashing
+    res = is_gpu_available()
+    assert isinstance(res, bool)
+
+
+def test_build_knn_graph_basic():
+    coords = np.array([
+        [0.0, 0.0],
+        [1.0, 0.0],
+        [2.0, 0.0],
+        [10.0, 10.0]
+    ])
+    adj, lap = build_knn_graph(coords, n_neighbors=2, backend="auto")
+    assert adj.shape == (4, 4)
+    assert lap is not None
+    assert lap.shape == (4, 4)
+    # Node 0 nearest neighbor should include Node 1
+    assert adj[0, 1] == 1.0
+    assert adj[1, 0] == 1.0
+    # Graph is symmetric and undirected
+    np.testing.assert_allclose(adj.toarray(), adj.toarray().T)
+
+
+def test_build_knn_graph_empty():
+    coords = np.empty((0, 2))
+    adj, lap = build_knn_graph(coords, n_neighbors=5)
+    assert adj.shape == (0, 0)
+    assert lap is not None
+    assert lap.shape == (0, 0)
+
+
+def test_build_knn_graph_gpu_fallback():
+    # If cuml is requested on a non-CUDA host, it should gracefully fall back to CPU
+    coords = np.random.uniform(0, 100, (20, 2))
+    adj, lap = build_knn_graph(coords, n_neighbors=3, backend="cuml")
+    assert adj.shape == (20, 20)
+    assert lap is not None
 
 
 def test_build_spatial_graph_empty():
@@ -51,16 +93,18 @@ def test_build_spatial_graph_backends():
     adj_seq, _ = build_spatial_graph(coords, max_distance=15.0, n_jobs=1)
     adj_multi, _ = build_spatial_graph(coords, max_distance=15.0, n_jobs=2, backend="multiprocessing")
     adj_thread, _ = build_spatial_graph(coords, max_distance=15.0, n_jobs=2, backend="threading")
-    
+    adj_auto, _ = build_spatial_graph(coords, max_distance=15.0, backend="auto")
+
     assert (adj_seq != adj_multi).nnz == 0
     assert (adj_seq != adj_thread).nnz == 0
+    assert (adj_seq != adj_auto).nnz == 0
 
 
 def test_to_pyg_data():
     counts = np.array([[1, 2], [3, 4], [5, 6]], dtype=np.float32)
     coords = np.array([[0, 0], [5, 0], [10, 0]], dtype=np.float32)
     adj, _ = build_spatial_graph(coords, max_distance=6.0)
-    
+
     pyg_out = to_pyg_data(counts, coords, adj)
     if isinstance(pyg_out, dict):
         assert "x" in pyg_out
@@ -86,19 +130,16 @@ def test_compute_laplacian_spectrum():
 
 
 def test_spatial_autocorrelation_morans_i():
-    # Grid of 4 nodes: 0-(1,0), 1-(2,0), 2-(3,0), 3-(4,0)
     coords = np.array([[1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [4.0, 0.0]])
     adj, _ = build_spatial_graph(coords, max_distance=1.5)
-    
-    # Highly spatially autocorrelated gene (smooth gradient: 1, 2, 3, 4)
-    # Random un-correlated gene (1, 10, 1, 10)
+
     counts = np.array([
         [1.0, 1.0],
         [2.0, 10.0],
         [3.0, 1.0],
         [4.0, 10.0]
     ])
-    
+
     morans_i, z_scores, p_values = compute_morans_i(counts, adj)
     assert len(morans_i) == 2
     # Gene 0 should have high positive Moran's I
@@ -111,7 +152,7 @@ def test_spatial_autocorrelation_gearys_c():
     coords = np.array([[1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [4.0, 0.0]])
     adj, _ = build_spatial_graph(coords, max_distance=1.5)
     counts = np.array([[1.0], [2.0], [3.0], [4.0]])
-    
+
     c_val = compute_gearys_c(counts, adj)
     assert len(c_val) == 1
     # Low Geary's C (< 1.0) indicates positive spatial autocorrelation
@@ -129,7 +170,7 @@ def test_compute_spatially_variable_genes():
     ])
     genes = ["GENE_A", "GENE_B"]
     df_svg = compute_spatially_variable_genes(counts, genes, adj)
-    
+
     assert list(df_svg.columns) == ["gene", "morans_i", "gearys_c", "z_score", "p_value", "fdr_p_value"]
     assert len(df_svg) == 2
     assert df_svg.iloc[0]["gene"] == "GENE_A"

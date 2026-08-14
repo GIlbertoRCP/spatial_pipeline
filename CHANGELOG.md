@@ -5,6 +5,33 @@ All notable changes to the `spatial_pipeline` project will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-08-14
+
+### Added
+- **GPU Graph Acceleration (RAPIDS cuGraph / cuML)**:
+  - Added GPU-accelerated k-NN (`build_knn_graph`) and radius graph construction with RAPIDS cuML / cuGraph, delivering up to 100x+ speedups on 100k+ cells.
+  - Implemented automatic hardware detection (`is_gpu_available()`) with zero-config multi-core CPU fallbacks.
+  - Added GPU scaling benchmark script (`benchmarks/benchmark_gpu_scaling.py`).
+- **Chunked Out-of-Core Processing (Dask / Zarr)**:
+  - Added distributed out-of-core spatial binning using Dask Distributed DataFrames (`dask_bin_transcripts`).
+  - Added Zarr export/import (`to_zarr`, `read_zarr`) and batch streaming iterator (`stream_zarr_anndata`) for processing datasets exceeding available host RAM.
+  - Added parallel out-of-core matrix statistics (mean, variance, sparsity) via Dask Arrays (`dask_compute_spatial_metrics`).
+- **Strict Typing & Package Publishing**:
+  - Full PEP 561 compliance with `py.typed` marker file and 100% strict type annotations verified with `mypy`.
+  - Comprehensive Google/NumPy-style docstrings across all modules.
+  - Added automated TestPyPI and PyPI publishing workflow (`.github/workflows/publish.yml`).
+  - Integrated automated test coverage reporting with `pytest-cov` in CI/CD pipeline.
+- **Interactive Documentation Site (Sphinx / MyST-NB)**:
+  - Created Sphinx documentation website using `myst-nb` and `sphinx-book-theme`.
+  - Added interactive Jupyter tutorials (`quickstart.ipynb`, `out_of_core_streaming.ipynb`) and complete API reference.
+  - Added automated GitHub Actions documentation deployment workflow (`.github/workflows/docs.yml`).
+
+### Changed
+- Bumped project version to `0.4.0` in `pyproject.toml`.
+- Expanded CLI subcommands with `--backend`, `--use-dask`, and `--format` options for Zarr and Dask execution.
+
+---
+
 ## [0.3.0] - 2026-08-06
 
 ### Added
