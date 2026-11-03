@@ -116,17 +116,17 @@ def test_build_sparse_matrix():
         [0, 0],  # bin 0
         [1, 1],  # bin 2
     ])
-    genes = np.array(["ACTB", "ACTB", "CD3D", "GAPDH", "CD3D"])
+    labels = np.array(["ACTB", "ACTB", "CD3D", "GAPDH", "CD3D"])
     
-    matrix, unique_bins, unique_genes = build_sparse_matrix(bin_coords, genes, "csr")
+    matrix, unique_bins, unique_labels = build_sparse_matrix(bin_coords, labels, "csr")
     
     assert len(unique_bins) == 3
-    assert set(unique_genes) == {"ACTB", "CD3D", "GAPDH"}
+    assert set(unique_labels) == {"ACTB", "CD3D", "GAPDH"}
     
     # Find column indices
-    actb_col = np.where(unique_genes == "ACTB")[0][0]
-    cd3d_col = np.where(unique_genes == "CD3D")[0][0]
-    gapdh_col = np.where(unique_genes == "GAPDH")[0][0]
+    actb_col = np.where(unique_labels == "ACTB")[0][0]
+    cd3d_col = np.where(unique_labels == "CD3D")[0][0]
+    gapdh_col = np.where(unique_labels == "GAPDH")[0][0]
     
     # Find row indices of the unique bins
     bin_0_0 = np.where((unique_bins == [0, 0]).all(axis=1))[0][0]
@@ -202,7 +202,7 @@ def test_square_binning_aggregation():
     mock_data = pd.DataFrame({
         'x': [10.2, 10.5, 10.8],
         'y': [20.1, 20.4, 20.3],
-        'gene': pd.Series(['GeneA', 'GeneB', 'GeneA'], dtype='category')
+        'label': pd.Series(['GeneA', 'GeneB', 'GeneA'], dtype='category')
     })
     
     # Run binning with a resolution wide enough to hold all 3 molecules
@@ -218,7 +218,7 @@ def test_out_of_core_equivalence():
     mock_data = pd.DataFrame({
         'x': [12.5, 13.1, 55.0, 14.2, 85.0, 88.0, 102.0],
         'y': [45.2, 44.8, 82.1, 46.0, 81.0, 83.0, 105.0],
-        'gene': pd.Series(['GAPDH', 'GAPDH', 'MALAT1', 'ACTB', 'GAPDH', 'MALAT1', 'ACTB'], dtype='category')
+        'label': pd.Series(['GAPDH', 'GAPDH', 'MALAT1', 'ACTB', 'GAPDH', 'MALAT1', 'ACTB'], dtype='category')
     })
     
     # Save mock data to temporary file
@@ -252,7 +252,7 @@ def test_out_of_core_equivalence():
         process_tile_out_of_core(tx, ty, tile_size, resolution, max_dist, partition_dir, tmp_out_dir)
         
     # Stitch
-    counts_ooc, centers_ooc, genes_ooc, adj_ooc, lap_ooc = stitch_out_of_core_results(tmp_out_dir, resolution)
+    counts_ooc, centers_ooc, labels_ooc, adj_ooc, lap_ooc = stitch_out_of_core_results(tmp_out_dir, resolution)
     
     # Clean up files
     try:
@@ -371,13 +371,13 @@ def test_pyarrow_zero_copy_and_io():
     # PyArrow Table loading
     table = load_transcript_arrow(file_path)
     assert table.num_rows == 1000
-    assert table.column_names == ["x", "y", "gene"]
+    assert table.column_names == ["x", "y", "label"]
     
     # Zero-copy dictionary conversion
     arr_dict = arrow_table_to_numpy(table)
     assert len(arr_dict["x"]) == 1000
     assert len(arr_dict["y"]) == 1000
-    assert len(arr_dict["gene"]) == 1000
+    assert len(arr_dict["label"]) == 1000
     
     # Arrow-enabled DataFrame load
     df_arrow = load_transcript_data(file_path, use_arrow=True)
@@ -434,23 +434,23 @@ def test_anndata_ecosystem_interop():
     mock_data = pd.DataFrame({
         'x': [10.0, 15.0, 20.0, 25.0],
         'y': [10.0, 15.0, 20.0, 25.0],
-        'gene': pd.Series(['GeneA', 'GeneB', 'GeneA', 'GeneB'], dtype='category')
+        'label': pd.Series(['GeneA', 'GeneB', 'GeneA', 'GeneB'], dtype='category')
     })
     sparse_counts, bin_coords = compute_square_bins(mock_data, resolution=10.0)
     adj_matrix, laplacian_matrix = build_spatial_graph(bin_coords, max_distance=15.0)
-    genes = np.array(['GeneA', 'GeneB'])
+    labels = np.array(['GeneA', 'GeneB'])
     
     # 1. Create AnnData
     adata = to_anndata(
         sparse_counts, 
         bin_coords, 
-        genes=genes, 
+        labels=labels, 
         adjacency_matrix=adj_matrix, 
         laplacian_matrix=laplacian_matrix
     )
     
     assert adata.n_obs == len(bin_coords)
-    assert adata.n_vars == len(genes)
+    assert adata.n_vars == len(labels)
     assert 'spatial' in adata.obsm
     assert 'spatial_connectivities' in adata.obsp
     assert 'spatial_laplacian' in adata.obsp
@@ -458,7 +458,7 @@ def test_anndata_ecosystem_interop():
     # 2. Reconstruct from AnnData
     extracted = from_anndata(adata)
     np.testing.assert_allclose(extracted['bin_coords'], bin_coords)
-    np.testing.assert_array_equal(extracted['genes'], genes)
+    np.testing.assert_array_equal(extracted['labels'], labels)
     
     # 3. Save and read .h5ad file
     h5ad_file = "test_spatial_anndata.h5ad"
@@ -488,7 +488,7 @@ def test_min_counts_thresholding():
     mock_data = pd.DataFrame({
         'x': [10.0, 10.0, 10.0, 90.0],
         'y': [10.0, 10.0, 10.0, 90.0],
-        'gene': pd.Series(['GeneA', 'GeneA', 'GeneB', 'GeneA'], dtype='category')
+        'label': pd.Series(['GeneA', 'GeneA', 'GeneB', 'GeneA'], dtype='category')
     })
     
     # min_counts = 1 -> keeps both bins
@@ -504,7 +504,7 @@ def test_pyg_data_export():
     mock_data = pd.DataFrame({
         'x': [10.0, 20.0, 30.0],
         'y': [10.0, 20.0, 30.0],
-        'gene': pd.Series(['GeneA', 'GeneB', 'GeneA'], dtype='category')
+        'label': pd.Series(['GeneA', 'GeneB', 'GeneA'], dtype='category')
     })
     sparse_counts, bin_coords = compute_square_bins(mock_data, resolution=15.0)
     adj_matrix, _ = build_spatial_graph(bin_coords, max_distance=20.0)

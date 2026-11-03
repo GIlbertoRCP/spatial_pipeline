@@ -52,7 +52,7 @@ def test_cli_svg():
         generate_vectorized_mock_data(tmp_csv, num_molecules=300)
         result = runner.invoke(app, ["svg", "--input", tmp_csv, "--top-n", "5"])
         assert result.exit_code == 0
-        assert "Top 5 Spatially Variable Genes" in result.stdout
+        assert "Top 5 Spatially Variable Labels" in result.stdout
     finally:
         if os.path.exists(tmp_csv):
             os.remove(tmp_csv)

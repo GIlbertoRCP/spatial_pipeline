@@ -333,7 +333,7 @@ def get_bin_centers(
 
 def build_sparse_matrix(
     bin_coords: np.ndarray,
-    genes: np.ndarray,
+    labels: np.ndarray,
     matrix_format: Literal["csr", "csc"] = "csr"
 ) -> tuple[csr_matrix | csc_matrix, np.ndarray, np.ndarray]:
     """
@@ -341,22 +341,22 @@ def build_sparse_matrix(
 
     Args:
         bin_coords: 2D array of shape (N, 2) containing integer bin coordinates for each molecule.
-        genes: 1D array of gene names (strings or categories) for each molecule.
+        labels: 1D array of label names (strings or categories) for each molecule.
         matrix_format: Format of sparse matrix: 'csr' or 'csc'.
 
     Returns:
         tuple[csr_matrix | csc_matrix, np.ndarray, np.ndarray]:
-            - sparse_matrix: Matrix of shape (num_active_bins, num_unique_genes) containing count data.
+            - sparse_matrix: Matrix of shape (num_active_bins, num_unique_labels) containing count data.
             - unique_bins: 2D array of shape (num_active_bins, 2) of active bin coordinates.
-            - unique_genes: 1D array of shape (num_unique_genes,) of sorted gene names.
+            - unique_labels: 1D array of shape (num_unique_labels,) of sorted label names.
     """
     unique_bins, inverse_bins = np.unique(bin_coords, axis=0, return_inverse=True)
-    unique_genes, inverse_genes = np.unique(genes, return_inverse=True)
+    unique_labels, inverse_labels = np.unique(labels, return_inverse=True)
 
-    counts = np.ones(len(genes), dtype=int)
+    counts = np.ones(len(labels), dtype=int)
     coo = coo_matrix(
-        (counts, (inverse_bins, inverse_genes)),
-        shape=(len(unique_bins), len(unique_genes)),
+        (counts, (inverse_bins, inverse_labels)),
+        shape=(len(unique_bins), len(unique_labels)),
         dtype=int
     )
 
@@ -367,7 +367,7 @@ def build_sparse_matrix(
     else:
         raise ValueError(f"Unsupported sparse matrix format: {matrix_format}. Use 'csr' or 'csc'.")
 
-    return sparse_matrix, unique_bins, unique_genes
+    return sparse_matrix, unique_bins, unique_labels
 
 
 def bin_voronoi(
@@ -418,24 +418,24 @@ def compute_square_bins(
     Spatially bins continuous coordinate points into discrete grid blocks and constructs sparse count matrix.
 
     Args:
-        df: DataFrame containing 'x', 'y', and 'gene' columns.
+        df: DataFrame containing 'x', 'y', and 'label' columns.
         resolution: Physical width of each square bin.
         min_counts: Minimum transcript count threshold per bin to eliminate background noise.
 
     Returns:
         tuple[csr_matrix, np.ndarray]:
-            - sparse_counts: Compressed Sparse Row matrix of shape (num_bins, num_genes).
+            - sparse_counts: Compressed Sparse Row matrix of shape (num_bins, num_labels).
             - bin_coords: Array of shape (num_bins, 2) holding center (x, y) coordinates for each valid bin.
     """
     x = df["x"].to_numpy()
     y = df["y"].to_numpy()
 
     if len(x) == 0:
-        num_genes = len(df["gene"].cat.categories) if hasattr(df["gene"], "cat") else 0
-        return csr_matrix((0, num_genes), dtype=np.int32), np.empty((0, 2))
+        num_labels = len(df["label"].cat.categories) if hasattr(df["label"], "cat") else 0
+        return csr_matrix((0, num_labels), dtype=np.int32), np.empty((0, 2))
 
-    gene_codes = df["gene"].cat.codes.to_numpy()
-    num_genes = len(df["gene"].cat.categories)
+    label_codes = df["label"].cat.codes.to_numpy()
+    num_labels = len(df["label"].cat.categories)
 
     x_min, y_min = float(x.min()), float(y.min())
 
@@ -456,8 +456,8 @@ def compute_square_bins(
     bin_coords = np.column_stack((bin_x_centers, bin_y_centers))
 
     sparse_counts = csr_matrix(
-        (np.ones_like(inverse_indices), (inverse_indices, gene_codes)),
-        shape=(num_unique_bins, num_genes),
+        (np.ones_like(inverse_indices), (inverse_indices, label_codes)),
+        shape=(num_unique_bins, num_labels),
         dtype=np.int32
     )
 

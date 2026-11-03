@@ -2,7 +2,7 @@
 Spatial graph generation, GPU acceleration (RAPIDS cuGraph / cuML), and spatial statistics.
 
 This module provides high-performance graph construction routines (k-NN, radius graphs,
-Graph Laplacians, spectral decomposition, Moran's I, Geary's C, and Spatially Variable Gene
+Graph Laplacians, spectral decomposition, Moran's I, Geary's C, and Spatially Variable Label
 detection) supporting both multi-core CPU parallel execution and RAPIDS GPU acceleration.
 """
 
@@ -372,11 +372,11 @@ def to_pyg_data(
     adjacency_matrix: csr_matrix
 ) -> Any:
     """
-    Converts binned gene expression counts, spatial coordinates, and spatial adjacency matrix
+    Converts binned label counts, spatial coordinates, and spatial adjacency matrix
     into PyTorch Geometric (PyG) `Data` object format for GNN downstream spatial modeling.
 
     Parameters:
-        sparse_counts: Node feature expression matrix of shape (num_bins, num_genes).
+        sparse_counts: Node feature expression matrix of shape (num_bins, num_labels).
         bin_coords: Spatial node positions of shape (num_bins, 2).
         adjacency_matrix: Adjacency graph matrix of shape (num_bins, num_bins).
 
@@ -448,17 +448,17 @@ def compute_morans_i(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Vectorized computation of Moran's I spatial autocorrelation statistic,
-    z-scores, and p-values for all genes across a spatial graph.
+    z-scores, and p-values for all labels across a spatial graph.
 
     Parameters:
-        sparse_counts: Matrix of shape (N_bins, N_genes) containing binned gene expression counts.
+        sparse_counts: Matrix of shape (N_bins, N_labels) containing binned label counts.
         adjacency_matrix: Binary spatial adjacency matrix of shape (N_bins, N_bins).
 
     Returns:
         tuple[np.ndarray, np.ndarray, np.ndarray]:
-            - morans_i: 1D array of shape (N_genes,) with Moran's I statistic values.
-            - z_scores: 1D array of shape (N_genes,) with z-scores.
-            - p_values: 1D array of shape (N_genes,) with two-sided p-values.
+            - morans_i: 1D array of shape (N_labels,) with Moran's I statistic values.
+            - z_scores: 1D array of shape (N_labels,) with z-scores.
+            - p_values: 1D array of shape (N_labels,) with two-sided p-values.
     """
     from scipy.stats import norm
 
@@ -514,14 +514,14 @@ def compute_gearys_c(
     adjacency_matrix: csr_matrix
 ) -> np.ndarray:
     """
-    Vectorized computation of Geary's C spatial autocorrelation statistic for all genes.
+    Vectorized computation of Geary's C spatial autocorrelation statistic for all labels.
 
     Parameters:
-        sparse_counts: Matrix of shape (N_bins, N_genes).
+        sparse_counts: Matrix of shape (N_bins, N_labels).
         adjacency_matrix: Binary spatial adjacency matrix of shape (N_bins, N_bins).
 
     Returns:
-        np.ndarray: 1D array of shape (N_genes,) with Geary's C statistic values.
+        np.ndarray: 1D array of shape (N_labels,) with Geary's C statistic values.
     """
     if hasattr(sparse_counts, "toarray"):
         X = sparse_counts.toarray().astype(np.float64)
@@ -551,27 +551,27 @@ def compute_gearys_c(
     return gearys_c
 
 
-def compute_spatially_variable_genes(
+def compute_spatially_variable_labels(
     sparse_counts: Any,
-    gene_names: Any,
+    label_names: Any,
     adjacency_matrix: csr_matrix,
     top_n: int | None = None
 ) -> pd.DataFrame:
     """
-    Computes Moran's I and Geary's C statistics for all genes and returns a ranked DataFrame
+    Computes Moran's I and Geary's C statistics for all labels and returns a ranked DataFrame
     with adjusted p-values (FDR Benjamini-Hochberg correction).
 
     Args:
-        sparse_counts: Matrix of shape (N_bins, N_genes).
-        gene_names: 1D list or array of gene identifiers.
+        sparse_counts: Matrix of shape (N_bins, N_labels).
+        label_names: 1D list or array of label identifiers.
         adjacency_matrix: Binary spatial adjacency matrix of shape (N_bins, N_bins).
-        top_n: Optional number of top ranked spatially variable genes to return.
+        top_n: Optional number of top ranked spatially variable labels to return.
 
     Returns:
         pd.DataFrame: Table sorted by Moran's I descending with columns:
-            ['gene', 'morans_i', 'gearys_c', 'z_score', 'p_value', 'fdr_p_value'].
+            ['label', 'morans_i', 'gearys_c', 'z_score', 'p_value', 'fdr_p_value'].
     """
-    gene_names_arr = np.asarray(gene_names)
+    label_names_arr = np.asarray(label_names)
     morans_i, z_scores, p_values = compute_morans_i(sparse_counts, adjacency_matrix)
     gearys_c = compute_gearys_c(sparse_counts, adjacency_matrix)
 
@@ -588,7 +588,7 @@ def compute_spatially_variable_genes(
         fdr[sorted_indices[i]] = min(1.0, cummin)
 
     df = pd.DataFrame({
-        "gene": gene_names_arr,
+        "label": label_names_arr,
         "morans_i": morans_i,
         "gearys_c": gearys_c,
         "z_score": z_scores,

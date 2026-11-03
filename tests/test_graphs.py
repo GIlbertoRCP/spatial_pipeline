@@ -8,7 +8,7 @@ from spatial_pipeline.graphs import (
     compute_gearys_c,
     compute_laplacian_spectrum,
     compute_morans_i,
-    compute_spatially_variable_genes,
+    compute_spatially_variable_labels,
     is_gpu_available,
     to_pyg_data,
 )
@@ -142,9 +142,9 @@ def test_spatial_autocorrelation_morans_i():
 
     morans_i, z_scores, p_values = compute_morans_i(counts, adj)
     assert len(morans_i) == 2
-    # Gene 0 should have high positive Moran's I
+    # Label 0 should have high positive Moran's I
     assert morans_i[0] > 0.0
-    # Gene 1 (alternating) should have negative/low Moran's I
+    # Label 1 (alternating) should have negative/low Moran's I
     assert morans_i[0] > morans_i[1]
 
 
@@ -159,7 +159,7 @@ def test_spatial_autocorrelation_gearys_c():
     assert c_val[0] < 1.0
 
 
-def test_compute_spatially_variable_genes():
+def test_compute_spatially_variable_labels():
     coords = np.array([[1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [4.0, 0.0]])
     adj, _ = build_spatial_graph(coords, max_distance=1.5)
     counts = np.array([
@@ -168,9 +168,9 @@ def test_compute_spatially_variable_genes():
         [3.0, 1.0],
         [4.0, 10.0]
     ])
-    genes = ["GENE_A", "GENE_B"]
-    df_svg = compute_spatially_variable_genes(counts, genes, adj)
+    labels = ["GENE_A", "GENE_B"]
+    df_svg = compute_spatially_variable_labels(counts, labels, adj)
 
-    assert list(df_svg.columns) == ["gene", "morans_i", "gearys_c", "z_score", "p_value", "fdr_p_value"]
+    assert list(df_svg.columns) == ["label", "morans_i", "gearys_c", "z_score", "p_value", "fdr_p_value"]
     assert len(df_svg) == 2
-    assert df_svg.iloc[0]["gene"] == "GENE_A"
+    assert df_svg.iloc[0]["label"] == "GENE_A"

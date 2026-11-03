@@ -35,7 +35,7 @@ def main():
     # 2. Ingest transcripts using low-memory datatypes
     print("\n[*] Step 2: Loading transcript coordinates...")
     df = load_transcript_data(csv_path)
-    print(f"[+] Loaded {len(df):,} total molecules across {len(df['gene'].cat.categories)} unique genes.")
+    print(f"[+] Loaded {len(df):,} total molecules across {len(df['label'].cat.categories)} unique labels.")
     
     # 3. Vectorized spatial binning (15 um resolution grid, min count threshold = 2)
     print("\n[*] Step 3: Executing spatial grid binning (Resolution: 15.0 um)...")
@@ -52,7 +52,7 @@ def main():
     adata = to_anndata(
         sparse_counts,
         bin_coords,
-        genes=np.array(df["gene"].cat.categories),
+        labels=np.array(df["label"].cat.categories),
         adjacency_matrix=adj_matrix,
         laplacian_matrix=laplacian_matrix,
         metadata={"sample_id": "sample_001", "resolution_um": 15.0}

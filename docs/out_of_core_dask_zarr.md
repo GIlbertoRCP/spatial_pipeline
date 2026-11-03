@@ -12,7 +12,7 @@ For raw coordinate CSV files larger than RAM, `spatial_pipeline.dask_bin_transcr
 import spatial_pipeline as sp
 
 # Out-of-core binning on massive transcript CSV
-sparse_counts, bin_coords, unique_genes = sp.dask_bin_transcripts(
+sparse_counts, bin_coords, unique_labels = sp.dask_bin_transcripts(
     "massive_transcripts.csv",
     resolution=10.0,
     min_counts=1,
@@ -28,8 +28,8 @@ sparse_counts, bin_coords, unique_genes = sp.dask_bin_transcripts(
 
 ```python
 # Convert and save to Zarr store
-adata = sp.to_anndata(sparse_counts, bin_coords, genes=unique_genes)
-sp.to_zarr(adata, "experiment.zarr", chunks=(10000, len(unique_genes)))
+adata = sp.to_anndata(sparse_counts, bin_coords, labels=unique_labels)
+sp.to_zarr(adata, "experiment.zarr", chunks=(10000, len(unique_labels)))
 ```
 
 ### Out-of-Core Batch Streaming
@@ -46,12 +46,12 @@ for batch_X, batch_spatial, var_names in sp.stream_zarr_anndata("experiment.zarr
 
 ## 3. Parallel Dask Matrix Computations
 
-Compute gene dispersion, mean, variance, and sparsity across out-of-core Zarr datasets using Dask Array operations:
+Compute label dispersion, mean, variance, and sparsity across out-of-core Zarr datasets using Dask Array operations:
 
 ```python
 metrics = sp.dask_compute_spatial_metrics("experiment.zarr", chunk_size=10000)
 
-print("Mean gene expression:", metrics["mean"])
-print("Gene variance:", metrics["var"])
-print("Gene sparsity:", metrics["sparsity"])
+print("Mean label counts:", metrics["mean"])
+print("Label variance:", metrics["var"])
+print("Label sparsity:", metrics["sparsity"])
 ```

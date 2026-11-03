@@ -1,188 +1,132 @@
-# Spatial Pipeline (Spatial Transcriptomics Data Engine)
+# Spatial Pipeline: Photo Hotspot Engine
 
 [![CI/CD Pipeline](https://github.com/gilbertorcp/spatial_pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/gilbertorcp/spatial_pipeline/actions/workflows/ci.yml)
-[![Docs](https://img.shields.io/badge/docs-Sphinx%20%7C%20MyST--NB-blue.svg)](https://gilbertorcp.github.io/spatial_pipeline)
 [![Python Version](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](https://pypi.org/project/spatial-pipeline/)
-[![GPU RAPIDS](https://img.shields.io/badge/GPU-RAPIDS%20cuGraph%20%7C%20cuML-76B900.svg)](https://rapids.ai/)
-[![Out-of-Core](https://img.shields.io/badge/Out--of--Core-Dask%20%7C%20Zarr-orange.svg)](https://www.dask.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**`spatial_pipeline`** is a high-performance Python engine for spatial transcriptomics (10x Genomics Xenium, Vizgen MERSCOPE, Nanostring CosMx, Stereo-seq). It combines vectorized spatial binning, GPU-accelerated spatial graph generation (RAPIDS cuGraph & cuML), Dask/Zarr out-of-core streaming for datasets larger than host RAM, Spatially Variable Gene (SVG) discovery, and seamless AnnData / PyTorch Geometric interoperability.
+**Where and when should I shoot?** `spatial_pipeline` finds photo hotspots from millions of
+geotagged photos. It streams [YFCC100M](https://multimediacommons.wordpress.com/yfcc100m-core-dataset/)
+Flickr metadata, bins photos into equal-area hexes, counts **unique photographers** (not raw
+photos), and ranks tags by how strongly they cluster in space (Moran's I). That separates
+place-specific subjects like `maroon bells` or `red rocks` from tags that show up everywhere,
+like `colorado`.
+
+> **Status:** milestone 1 of [PLAN.md](PLAN.md): a Colorado hotspot map built from metadata only.
+> Image embeddings, hidden-gem scoring, golden-hour timing and the live "shoot tonight" layer
+> come in later milestones.
 
 ---
 
-## 🚀 Key Engineering Additions (v0.4.0)
-
-1. **⚡ GPU Graph Acceleration (RAPIDS cuGraph / cuML)**:
-   - GPU-accelerated k-NN and radius graph construction delivering **up to 100x+ speedups** on datasets exceeding 100,000+ cells.
-   - Automatic hardware detection with seamless, zero-config CPU multi-core fallbacks.
-2. **💾 Chunked Out-of-Core Processing (Dask / Zarr)**:
-   - Distributed out-of-core spatial binning using **Dask Distributed DataFrames** (`dask_bin_transcripts`).
-   - Chunked **Zarr hierarchy storage** (`to_zarr`, `read_zarr`) and batch streaming generator (`stream_zarr_anndata`) for memory-constrained workflows.
-   - Parallel out-of-core matrix statistics (mean, variance, sparsity) via **Dask Arrays**.
-3. **🛡️ Strict Type Safety & Automated CI/CD**:
-   - 100% strict type annotation and PEP 561 compliance (`py.typed`), validated with `mypy`.
-   - Comprehensive Google/NumPy-style docstrings across all public APIs.
-   - Automated multi-platform CI/CD with Ruff linting, test coverage reporting, and TestPyPI / PyPI release workflows.
-4. **📚 Interactive Documentation Site (Sphinx / MyST-NB)**:
-   - Interactive Sphinx documentation site built with `myst-nb` and `sphinx-book-theme`.
-   - Executable Jupyter tutorial notebooks, architecture diagrams, and comprehensive API references.
-
----
-
-## 🏗️ System Architecture
+## How it works
 
 ```mermaid
-flowchart TD
-    subgraph Ingestion & Streaming Layer
-        A[Raw Transcripts CSV / Parquet] --> B{Ingestion Backend}
-        B -->|In-Memory| C[Zero-Copy PyArrow / Polars]
-        B -->|Out-of-Core| D[Dask Distributed DataFrame]
-        B -->|Streaming| Z[Zarr Chunked Array Store]
-    end
-
-    subgraph Spatial Compute & Binning
-        C --> H{Binning Engine}
-        D --> H
-        H -->|O1 Spatial Hashing| I[Uniform Grid Binning]
-        H -->|Pointy-Topped Hex| J[Hexagonal Axial Binning]
-        H -->|Adaptive Partitioning| K[Quadtree / KD-Tree]
-        H -->|Density-Adaptive| V[Voronoi Binning]
-    end
-
-    subgraph Graph & GPU Acceleration Layer
-        I --> L[Spatial Centers & Counts]
-        J --> L
-        K --> L
-        V --> L
-        L --> G{Graph Compute Engine}
-        G -->|NVIDIA GPU| GPU[RAPIDS cuML / cuGraph]
-        G -->|Multi-Core CPU| CPU[KD-Tree Parallel Workers]
-        GPU --> M[Adjacency Matrix A & Laplacian L]
-        CPU --> M
-    end
-
-    subgraph Downstream Ecosystem Interop
-        M --> SVG[Moran's I & Geary's C SVGs]
-        M --> AD[AnnData .h5ad / .zarr]
-        M --> PYG[PyTorch Geometric GNN Data]
-        AD --> UI[Interactive Streamlit Dashboard]
-    end
+flowchart LR
+    A[YFCC100M metadata<br/>TSV / .bz2 / SQLite] -->|stream in chunks,<br/>bbox + accuracy filter| B[Photo table<br/>photos.parquet]
+    B -->|lon/lat → EPSG:5070 meters| C[Hex binning]
+    C --> D[Unique photographers<br/>per hex × tag]
+    D --> E[Hex adjacency graph]
+    E --> F[Moran's I / Geary's C<br/>tag ranking + FDR]
+    D --> G[Streamlit + deck.gl map]
+    F --> G
 ```
 
+Design choices that matter for real photo data:
+
+- **Photographer-weighted counts.** Each person counts once per tag per hex. Without this, one
+  user who uploads 500 backyard shots creates a fake hotspot.
+- **Equal-area projection.** Coordinates are projected to CONUS Albers (EPSG:5070) before
+  binning, so every hex covers the same ground area and distances are in meters.
+- **Share normalization.** Tags are ranked by their *fraction* of each hex's photographers,
+  so a tag doesn't score high just because it appears where lots of people take photos.
+- **No isolated hexes in the statistics.** Hexes without neighbors would inflate Moran's I under
+  binary weights, so they are excluded (they still appear on the map).
+- **Streaming ingestion.** Metadata is read in chunks (SQLite pre-filters by bbox), so the full
+  100M-row dataset can be cut down to a region without loading it into memory.
+
 ---
 
-## 📊 Performance & GPU Scaling Benchmarks
+## Quickstart
 
-Benchmarked across single-thread CPU, multi-core CPU (16 cores), and NVIDIA GPU (RAPIDS cuML):
-
-| Dataset Size (Cells) | CPU (Single Thread) | CPU (Multi-Core) | GPU (RAPIDS cuML) | GPU Speedup |
-| :--- | :--- | :--- | :--- | :--- |
-| **10,000** | 120 ms | 45 ms | **8 ms** | **15.0x** |
-| **50,000** | 1.85 s | 0.42 s | **32 ms** | **57.8x** |
-| **100,000** | 5.60 s | 1.15 s | **68 ms** | **82.3x** |
-| **250,000** | 18.4 s | 3.60 s | **180 ms** | **102.2x** |
-
----
-
-## 💻 Quickstart
-
-### 1. Installation
+### Install
 
 ```bash
-# Standard installation
-pip install spatial_pipeline
-
-# With GPU acceleration (Linux)
-pip install spatial_pipeline[gpu]
+git clone https://github.com/gilbertorcp/spatial_pipeline.git
+cd spatial_pipeline
+pip install -e .[test]
 ```
 
-### 2. Python API
+### Get the data
+
+The YFCC100M metadata is published in the public AWS Multimedia Commons bucket as a single
+SQLite database (`s3://multimedia-commons/tools/etc/yfcc100m_dataset.sql`, about **65.6 GB**).
+The original Yahoo Webscope TSV (`yfcc100m_dataset`, optionally `.bz2`) also works. Both the
+23-column and the 25-column layouts are detected automatically.
+
+### Run
+
+```bash
+# 1. Keep geotagged Colorado photos (street-level accuracy by default)
+spatial-pipeline ingest-yfcc --input yfcc100m_dataset.sql --output photos.parquet --bbox colorado
+
+# 2. Hex hotspots at 1 km, rank tags by spatial clustering
+spatial-pipeline hotspots --input photos.parquet --output-dir hotspots --resolution 1000
+
+# 3. Explore the map
+spatial-pipeline ui
+```
+
+`--bbox` accepts `colorado`, `denver`, or `min_lon,min_lat,max_lon,max_lat`.
+
+### Python API
 
 ```python
-import spatial_pipeline as sp
+from spatial_pipeline import COLORADO_BBOX, compute_hotspots, read_yfcc_metadata
 
-# 1. Ingest coordinate data with PyArrow zero-copy
-df = sp.load_transcript_data("transcripts.csv", use_arrow=True)
+photos = read_yfcc_metadata("yfcc100m_dataset.sql", bbox=COLORADO_BBOX)
+result = compute_hotspots(photos, resolution=1000.0)
 
-# 2. 10µm square spatial binning
-sparse_counts, bin_coords = sp.compute_square_bins(df, resolution=10.0)
-
-# 3. GPU / CPU k-NN spatial graph building
-adj_matrix, laplacian = sp.build_knn_graph(bin_coords, n_neighbors=15, backend="auto")
-
-# 4. Spatially Variable Gene (SVG) Discovery
-svgs = sp.compute_spatially_variable_genes(
-    sparse_counts, 
-    gene_names=df["gene"].cat.categories, 
-    adjacency_matrix=adj_matrix,
-    top_n=10
-)
-print(svgs)
-
-# 5. AnnData & Zarr export
-adata = sp.to_anndata(sparse_counts, bin_coords, genes=df["gene"].cat.categories, adjacency_matrix=adj_matrix)
-sp.to_zarr(adata, "spatial_processed.zarr")
-```
-
-### 3. Out-of-Core Dask / Zarr Streaming
-
-```python
-# Out-of-core spatial binning for datasets larger than host RAM
-sparse_counts, bin_coords, unique_genes = sp.dask_bin_transcripts(
-    "massive_transcripts.csv",
-    resolution=10.0,
-    min_counts=2
-)
-
-# Stream chunks of 5,000 cells for deep learning model training
-for batch_X, batch_pos, var_names in sp.stream_zarr_anndata("spatial_processed.zarr", chunk_size=5000):
-    train_model(batch_X, batch_pos)
-```
-
-### 4. CLI Usage
-
-```bash
-# Run full spatial pipeline with automatic GPU/CPU dispatch
-spatial-pipeline run --input transcripts.csv --resolution 10.0 --backend auto
-
-# Run Dask out-of-core binning
-spatial-pipeline run --input massive.csv --use-dask
-
-# Identify top Spatially Variable Genes
-spatial-pipeline svg --input transcripts.csv --top-n 10
-
-# Export to Zarr hierarchy
-spatial-pipeline export --input transcripts.csv --output processed.zarr --format zarr
-
-# Run benchmarks
-spatial-pipeline benchmark --num-molecules 50000
+result.ranking.head(20)   # tags ranked by Moran's I, with FDR-corrected p-values
+result.hexes              # hex centers (lon/lat), photo and photographer counts
+result.label_counts       # photographers per (hex, tag)
 ```
 
 ---
 
-## 🧪 Testing & Verification
+## The engine underneath
 
-Run the test suite with coverage reporting:
+The spatial core is not photo-specific. It works on any labeled 2D points:
 
-```bash
-pytest -v --cov=spatial_pipeline --cov-report=term-missing
-```
+| Module | What it does |
+| :--- | :--- |
+| `binning` | Square (spatial hashing), hexagonal (axial), KD-tree, quadtree and Voronoi binning; sparse bin × label matrices |
+| `graphs` | Radius / k-NN spatial graphs (CPU multiprocessing or RAPIDS cuML on GPU), graph Laplacians, Moran's I, Geary's C |
+| `out_of_core` | Tiled processing with halo exchange for datasets larger than RAM, Dask binning |
+| `io` | Parquet / CSV / PyArrow loaders, AnnData and Zarr export |
+| `geo` | Bounding boxes, lon/lat ↔ projected coordinates |
+| `photos` | YFCC100M readers, tag decoding and filtering |
+| `hotspots` | Photographer-weighted hex hotspots and tag ranking |
 
-Run the GPU scaling benchmark:
-
-```bash
-python benchmarks/benchmark_gpu_scaling.py
-```
-
-Build the documentation site:
-
-```bash
-sphinx-build -b html docs docs/_build/html
-```
+The generic `run`, `svg`, `export` and `benchmark` CLI commands still operate on any
+`x, y, label` CSV.
 
 ---
 
-## 📄 License
+## Testing
 
-MIT License. Developed by Gilberto Romero-Cano.
+```bash
+pytest
+```
+
+The photo tests use a synthetic fixture in the real YFCC layout (`tests/yfcc_fixture.py`),
+clustered around real Colorado landmarks, with the edge cases the loader must handle: rows outside the
+bbox, videos, missing geotags, low accuracy, duplicates, and a single prolific uploader.
+
+> Performance numbers from earlier versions were measured on synthetic data and have been
+> removed. New benchmarks on the real YFCC100M dataset are part of milestone 5.
+
+---
+
+## License
+
+MIT. YFCC100M photos are Creative Commons licensed by their authors. This project
+stores metadata only. Any thumbnails shown must credit the photographer and link to the original.

@@ -1,0 +1,251 @@
+"""
+Photo hotspot analysis: hex binning, photographer-weighted counts, and spatial tag ranking.
+
+Counts are unique photographers, not photos: one person uploading 500 shots from their
+backyard is one vote for that hex, not 500. Tags are ranked by spatial autocorrelation
+(Moran's I) of their per-hex share, which surfaces tags that concentrate in specific
+places ('waterfall', 'redrocks') rather than tags that simply follow where people are.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
+
+import numpy as np
+import pandas as pd
+from scipy.sparse import csr_matrix, diags
+
+from .binning import bin_hexagonal, get_bin_centers
+from .geo import DEFAULT_CRS, project_lonlat, unproject_xy
+from .graphs import build_spatial_graph, compute_spatially_variable_labels
+from .photos import DEFAULT_STOP_TAGS, explode_tags
+
+
+@dataclass
+class HotspotResult:
+    """
+    Output of `compute_hotspots`.
+
+    Attributes:
+        hexes: One row per active hex: hex_id, q, r, x, y, lon, lat, photos, photographers.
+        label_counts: Long table of (hex_id, label, photographers) for the selected labels.
+        ranking: Labels ranked by Moran's I with Geary's C, z-score, FDR p-value,
+            total photographers and number of hexes.
+        matrix: Sparse (num_hexes, num_labels) matrix of unique-photographer counts.
+        labels: Label names, aligned with matrix columns.
+        adjacency: Hex adjacency (immediate neighbors) over the hexes used for statistics.
+        stats_hex_ids: hex_id of each row/column in `adjacency`.
+        resolution: Hex center-to-center distance in CRS units (meters by default).
+        crs: Projected CRS used for binning.
+    """
+
+    hexes: pd.DataFrame
+    label_counts: pd.DataFrame
+    ranking: pd.DataFrame
+    matrix: csr_matrix
+    labels: np.ndarray
+    adjacency: csr_matrix
+    stats_hex_ids: np.ndarray
+    resolution: float
+    crs: str
+
+
+def _unique_pair_counts(group_codes: np.ndarray, user_codes: np.ndarray, n_groups: int) -> np.ndarray:
+    """Counts distinct users per group code."""
+    if len(group_codes) == 0:
+        return np.zeros(n_groups, dtype=np.int64)
+    n_users = int(user_codes.max()) + 1
+    pairs = np.unique(group_codes.astype(np.int64) * n_users + user_codes.astype(np.int64))
+    return np.bincount(pairs // n_users, minlength=n_groups)
+
+
+def compute_hotspots(
+    photos: pd.DataFrame,
+    resolution: float = 1000.0,
+    crs: str = DEFAULT_CRS,
+    max_labels: int = 300,
+    min_label_photographers: int = 10,
+    min_hex_photographers: int = 3,
+    neighbor_rings: int = 1,
+    normalize: Literal["share", "count"] = "share",
+    stop_tags: frozenset[str] | set[str] = DEFAULT_STOP_TAGS,
+) -> HotspotResult:
+    """
+    Bins photos into hexes and ranks tags by how spatially clustered they are.
+
+    Args:
+        photos: Photo table with 'user_id', 'lon', 'lat', 'tags' columns.
+        resolution: Hex center-to-center distance in CRS units (default 1000 m).
+        crs: Projected CRS for binning (default EPSG:5070, CONUS Albers).
+        max_labels: Keep at most this many tags (most photographers first).
+        min_label_photographers: Minimum distinct photographers for a tag to be analyzed.
+        min_hex_photographers: Hexes with fewer distinct photographers are excluded from the
+            statistics (their tag shares are too noisy) but still appear in `hexes`.
+        neighbor_rings: Hexes within this many rings of each other are neighbors (1 = touching).
+            Hexes with no neighbors are excluded from the statistics: with binary weights,
+            isolated hexes inflate Moran's I (N / S0 grows while no neighbor pairs are added).
+        normalize: 'share' ranks tags by their fraction of each hex's photographers;
+            'count' uses raw photographer counts (dominated by overall photo density).
+        stop_tags: Tags to ignore.
+
+    Returns:
+        HotspotResult: Hex table, per-hex tag counts, tag ranking, and the underlying matrices.
+
+    Raises:
+        ValueError: If the photo table is empty.
+    """
+    if len(photos) == 0:
+        raise ValueError("No photos to analyze.")
+
+    photos = photos.reset_index(drop=True)
+    x, y = project_lonlat(photos["lon"].to_numpy(), photos["lat"].to_numpy(), crs)
+    qr = bin_hexagonal(x, y, resolution)
+    unique_qr, hex_of_photo = np.unique(qr, axis=0, return_inverse=True)
+    hex_of_photo = hex_of_photo.ravel()
+    n_hex = len(unique_qr)
+
+    user_codes, _ = pd.factorize(photos["user_id"])
+    photos_per_hex = np.bincount(hex_of_photo, minlength=n_hex)
+    photographers_per_hex = _unique_pair_counts(hex_of_photo, user_codes, n_hex)
+
+    centers = get_bin_centers(unique_qr, "hex", resolution)
+    lon, lat = unproject_xy(centers[:, 0], centers[:, 1], crs)
+    hexes = pd.DataFrame({
+        "hex_id": np.arange(n_hex),
+        "q": unique_qr[:, 0],
+        "r": unique_qr[:, 1],
+        "x": centers[:, 0],
+        "y": centers[:, 1],
+        "lon": lon,
+        "lat": lat,
+        "photos": photos_per_hex,
+        "photographers": photographers_per_hex,
+    })
+
+    # (hex, label, user) triples: each photographer counts once per tag per hex.
+    tags = explode_tags(photos, stop_tags=stop_tags)
+    idx = tags["photo_idx"].to_numpy()
+    triples = pd.DataFrame({
+        "hex_id": hex_of_photo[idx],
+        "label": tags["label"].to_numpy(),
+        "user": user_codes[idx],
+    }).drop_duplicates()
+
+    label_users = triples.drop_duplicates(["label", "user"])["label"].value_counts()
+    selected = label_users[label_users >= min_label_photographers].head(max_labels)
+    labels = np.asarray(selected.index, dtype=object)
+
+    triples = triples[triples["label"].isin(selected.index)]
+    label_codes = pd.Categorical(triples["label"], categories=labels).codes
+    matrix = csr_matrix(
+        (np.ones(len(triples), dtype=np.int32), (triples["hex_id"].to_numpy(), label_codes)),
+        shape=(n_hex, len(labels)),
+        dtype=np.int32,
+    )
+
+    label_counts = (
+        triples.groupby(["hex_id", "label"], observed=True).size().rename("photographers").reset_index()
+    )
+
+    # Ring k of a hex grid lies within k * resolution of the center hex.
+    stats_hex_ids = np.flatnonzero(photographers_per_hex >= min_hex_photographers)
+    adjacency, _ = build_spatial_graph(
+        centers[stats_hex_ids], max_distance=resolution * (neighbor_rings + 0.05), backend="cpu"
+    )
+    connected = np.asarray(adjacency.sum(axis=1)).ravel() > 0
+    stats_hex_ids = stats_hex_ids[connected]
+    adjacency = csr_matrix(adjacency[connected][:, connected])
+
+    stats_matrix = matrix[stats_hex_ids]
+    if normalize == "share":
+        stats_matrix = diags(1.0 / photographers_per_hex[stats_hex_ids]) @ stats_matrix
+
+    if len(labels) and len(stats_hex_ids) > 1:
+        ranking = compute_spatially_variable_labels(stats_matrix, labels, adjacency)
+    else:
+        ranking = pd.DataFrame(columns=["label", "morans_i", "gearys_c", "z_score", "p_value", "fdr_p_value"])
+    ranking["photographers"] = ranking["label"].map(selected).astype("int64")
+    ranking["hexes"] = ranking["label"].map(label_counts["label"].value_counts()).fillna(0).astype("int64")
+
+    return HotspotResult(
+        hexes=hexes,
+        label_counts=label_counts,
+        ranking=ranking,
+        matrix=matrix,
+        labels=labels,
+        adjacency=adjacency,
+        stats_hex_ids=stats_hex_ids,
+        resolution=float(resolution),
+        crs=crs,
+    )
+
+
+def hex_polygons_lonlat(x: np.ndarray, y: np.ndarray, resolution: float, crs: str = DEFAULT_CRS) -> list[list[list[float]]]:
+    """
+    Builds lon/lat outlines of pointy-topped hexes (matching `bin_hexagonal`) for map rendering.
+
+    Args:
+        x: 1D array of hex center x coordinates in `crs`.
+        y: 1D array of hex center y coordinates in `crs`.
+        resolution: Hex center-to-center distance.
+        crs: Projected CRS of the centers.
+
+    Returns:
+        list[list[list[float]]]: One ring of six [lon, lat] vertices per hex.
+    """
+    radius = resolution / np.sqrt(3.0)
+    angles = np.deg2rad(30.0 + 60.0 * np.arange(6))
+    vx = np.asarray(x)[:, None] + radius * np.cos(angles)[None, :]
+    vy = np.asarray(y)[:, None] + radius * np.sin(angles)[None, :]
+    lon, lat = unproject_xy(vx.ravel(), vy.ravel(), crs)
+    ring = np.stack([lon, lat], axis=1).reshape(len(vx), 6, 2)
+    return ring.tolist()
+
+
+def save_hotspots(result: HotspotResult, out_dir: str, extra_meta: dict[str, object] | None = None) -> None:
+    """
+    Writes hotspot outputs to a directory: hexes.parquet, label_counts.parquet, ranking.csv, meta.json.
+
+    Args:
+        result: Output of `compute_hotspots`.
+        out_dir: Target directory (created if needed).
+        extra_meta: Extra fields to record in meta.json (e.g. input path, bbox).
+    """
+    path = Path(out_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    result.hexes.to_parquet(path / "hexes.parquet", index=False)
+    result.label_counts.to_parquet(path / "label_counts.parquet", index=False)
+    result.ranking.to_csv(path / "ranking.csv", index=False)
+    meta: dict[str, object] = {
+        "resolution": result.resolution,
+        "crs": result.crs,
+        "num_hexes": len(result.hexes),
+        "num_stats_hexes": len(result.stats_hex_ids),
+        "num_labels": len(result.labels),
+        "num_photos": int(result.hexes["photos"].sum()),
+    }
+    if extra_meta:
+        meta.update(extra_meta)
+    (path / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+
+def load_hotspots(out_dir: str) -> dict[str, object]:
+    """
+    Loads the files written by `save_hotspots`.
+
+    Args:
+        out_dir: Directory containing the hotspot outputs.
+
+    Returns:
+        dict[str, object]: Keys 'hexes', 'label_counts', 'ranking' (DataFrames) and 'meta' (dict).
+    """
+    path = Path(out_dir)
+    return {
+        "hexes": pd.read_parquet(path / "hexes.parquet"),
+        "label_counts": pd.read_parquet(path / "label_counts.parquet"),
+        "ranking": pd.read_csv(path / "ranking.csv"),
+        "meta": json.loads((path / "meta.json").read_text(encoding="utf-8")),
+    }

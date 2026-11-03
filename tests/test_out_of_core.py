@@ -43,7 +43,7 @@ def test_out_of_core_partitioning_and_stitching():
         partition_dataset_to_tiles(mock_csv, tile_size=100.0, partition_dir=partition_dir)
 
         assert os.path.exists(partition_dir)
-        assert os.path.exists(os.path.join(partition_dir, "genes.npy"))
+        assert os.path.exists(os.path.join(partition_dir, "labels.npy"))
         assert os.path.exists(os.path.join(partition_dir, "offset.npy"))
 
         # Process a tile out of core
@@ -101,14 +101,14 @@ def test_dask_bin_transcripts():
         mock_csv = os.path.join(tmp_dir, "dask_transcripts.csv")
         generate_vectorized_mock_data(mock_csv, num_molecules=1200)
 
-        sparse_counts, bin_centers, unique_genes = dask_bin_transcripts(
+        sparse_counts, bin_centers, unique_labels = dask_bin_transcripts(
             mock_csv,
             resolution=25.0,
             min_counts=1
         )
 
         assert sparse_counts.shape[0] > 0
-        assert sparse_counts.shape[1] == len(unique_genes)
+        assert sparse_counts.shape[1] == len(unique_labels)
         assert bin_centers.shape[0] == sparse_counts.shape[0]
         assert bin_centers.shape[1] == 2
     finally:
@@ -127,9 +127,9 @@ def test_dask_compute_spatial_metrics():
             [4.0, 5.0, 2.0]
         ], dtype=np.float32)
         coords = np.array([[0, 0], [1, 1], [2, 2], [3, 3]], dtype=np.float32)
-        genes = np.array(["G1", "G2", "G3"])
+        labels = np.array(["G1", "G2", "G3"])
 
-        adata = to_anndata(sparse_counts=data, bin_coords=coords, genes=genes)
+        adata = to_anndata(sparse_counts=data, bin_coords=coords, labels=labels)
         to_zarr(adata, zarr_path)
 
         metrics = dask_compute_spatial_metrics(zarr_path, chunk_size=2)

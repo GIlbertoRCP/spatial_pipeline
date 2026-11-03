@@ -5,6 +5,24 @@ All notable changes to the `spatial_pipeline` project will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-11-03
+
+Pivot from spatial transcriptomics to geotagged photo hotspots (milestone 1 of `PLAN.md`).
+
+### Added
+- `photos` module: streaming YFCC100M metadata reader for TSV, `.bz2`/`.gz` TSV and SQLite (`read_yfcc_metadata`), with 23/25-column layout detection, bbox / accuracy / video filtering, deduplication, URL-encoded tag decoding and tag filtering (`explode_tags`).
+- `geo` module: named and custom bounding boxes (`parse_bbox`), lon/lat ↔ EPSG:5070 projection (`project_lonlat`, `unproject_xy`).
+- `hotspots` module: hex hotspots counted by unique photographers, tag ranking by Moran's I / Geary's C on per-hex tag share, hex outlines for mapping, save/load of outputs.
+- CLI commands `ingest-yfcc` and `hotspots`.
+- Synthetic YFCC-layout test fixture and tests for ingestion, hotspots, CLI and the Streamlit app.
+
+### Changed
+- Renamed the transcript-specific `gene` column and identifiers to the generic `label` throughout (`compute_spatially_variable_genes` → `compute_spatially_variable_labels`).
+- `load_coordinates` now reads generic `x, y, label` files; Xenium column mapping and QV filtering were removed.
+- Rewrote the Streamlit app (`app.py`) as an interactive hex hotspot map.
+- Rewrote the README; removed performance claims measured only on synthetic data.
+- Added `pyproj`, `pydeck` and `rich` dependencies; updated package metadata.
+
 ## [0.4.0] - 2026-08-14
 
 ### Added

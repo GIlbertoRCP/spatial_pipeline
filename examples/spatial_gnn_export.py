@@ -45,7 +45,7 @@ def main():
     
     if isinstance(pyg_obj, dict):
         print("[+] PyG-Compatible Standard Dictionary:")
-        print(f"    - Node Features (x): {pyg_obj['x'].shape} (num_bins x num_genes)")
+        print(f"    - Node Features (x): {pyg_obj['x'].shape} (num_bins x num_labels)")
         print(f"    - Spatial Coordinates (pos): {pyg_obj['pos'].shape} (num_bins x 2)")
         print(f"    - Edge Index (edge_index): {pyg_obj['edge_index'].shape} (2 x num_edges)")
     else:

@@ -1,0 +1,237 @@
+from __future__ import annotations
+
+import os
+
+import numpy as np
+import pandas as pd
+import pytest
+from typer.testing import CliRunner
+
+from spatial_pipeline.cli import app
+from spatial_pipeline.geo import COLORADO_BBOX, parse_bbox, project_lonlat, unproject_xy
+from spatial_pipeline.hotspots import compute_hotspots, load_hotspots, save_hotspots
+from spatial_pipeline.photos import (
+    decode_tags,
+    explode_tags,
+    load_photos,
+    read_yfcc_metadata,
+    save_photos,
+)
+from tests.yfcc_fixture import (
+    LANDMARKS,
+    PROLIFIC_USER,
+    make_rows,
+    write_sqlite,
+    write_tsv,
+)
+
+EXPECTED_KEPT = len(make_rows()) - 5  # outside bbox, video, no geo, low accuracy, duplicate
+
+
+# --- geo -------------------------------------------------------------------
+
+def test_parse_bbox_named_and_custom():
+    assert parse_bbox("Colorado") == COLORADO_BBOX
+    assert parse_bbox("-105.3, 39.5, -104.6, 39.9") == (-105.3, 39.5, -104.6, 39.9)
+    with pytest.raises(ValueError):
+        parse_bbox("1,2,3")
+    with pytest.raises(ValueError):
+        parse_bbox("-104,39,-105,40")  # min_lon > max_lon
+
+
+def test_projection_roundtrip_and_units():
+    lon = np.array([-104.9903, -105.2057])
+    lat = np.array([39.7392, 39.6654])
+    x, y = project_lonlat(lon, lat)
+    back_lon, back_lat = unproject_xy(x, y)
+    np.testing.assert_allclose(back_lon, lon, atol=1e-9)
+    np.testing.assert_allclose(back_lat, lat, atol=1e-9)
+    # Planar distance in meters should match the true geodesic distance within 1%.
+    from pyproj import Geod
+    _, _, geodesic = Geod(ellps="WGS84").inv(lon[0], lat[0], lon[1], lat[1])
+    dist = float(np.hypot(x[1] - x[0], y[1] - y[0]))
+    assert abs(dist - geodesic) / geodesic < 0.01
+
+
+# --- photo ingestion -------------------------------------------------------
+
+@pytest.mark.parametrize("width", [23, 25])
+def test_read_yfcc_tsv_layouts(tmp_path, width):
+    path = str(tmp_path / f"yfcc_{width}.tsv")
+    write_tsv(path, width=width)
+    photos = read_yfcc_metadata(path, bbox=COLORADO_BBOX, chunksize=97)
+
+    assert len(photos) == EXPECTED_KEPT
+    assert photos["photo_id"].is_unique
+    assert photos["lon"].between(COLORADO_BBOX[0], COLORADO_BBOX[2]).all()
+    assert (photos["accuracy"] >= 12).all()
+    assert not photos["tags"].str.contains("sanfrancisco|nogeo").any()
+    assert pd.api.types.is_datetime64_any_dtype(photos["taken_at"])
+
+
+def test_read_yfcc_bz2_and_sqlite_match_tsv(tmp_path):
+    tsv = str(tmp_path / "yfcc.tsv")
+    bz2 = str(tmp_path / "yfcc.tsv.bz2")
+    db = str(tmp_path / "yfcc.sql")
+    rows = write_tsv(tsv)
+    write_tsv(bz2, rows=rows)
+    write_sqlite(db, rows=rows)
+
+    ref = read_yfcc_metadata(tsv, bbox=COLORADO_BBOX).sort_values("photo_id").reset_index(drop=True)
+    for path in (bz2, db):
+        other = read_yfcc_metadata(path, bbox=COLORADO_BBOX, chunksize=50).sort_values("photo_id").reset_index(drop=True)
+        pd.testing.assert_frame_equal(ref, other)
+
+
+def test_read_yfcc_filters_can_be_relaxed(tmp_path):
+    path = str(tmp_path / "yfcc.tsv")
+    write_tsv(path)
+    photos = read_yfcc_metadata(path, bbox=None, min_accuracy=0, include_videos=True)
+    # Only the non-geotagged row and the duplicate are dropped.
+    assert len(photos) == len(make_rows()) - 2
+
+
+def test_read_yfcc_rejects_unknown_layout(tmp_path):
+    path = tmp_path / "bad.tsv"
+    path.write_text("a\tb\tc\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="23 or 25"):
+        read_yfcc_metadata(str(path))
+
+
+def test_decode_and_explode_tags():
+    decoded = decode_tags(pd.Series(["Rocky+Mountains,colorado", "", None, "caf%C3%A9"]))
+    assert decoded.tolist() == ["rocky mountains,colorado", "", "", "café"]
+
+    photos = pd.DataFrame({"tags": ["waterfall,2012,iphone,ab,waterfall,geo:lat=39", "lake"]})
+    tags = explode_tags(photos)
+    assert sorted(map(tuple, tags.to_numpy().tolist())) == [(0, "waterfall"), (1, "lake")]
+
+
+def test_save_and_load_photos_roundtrip(tmp_path):
+    src = str(tmp_path / "yfcc.tsv")
+    write_tsv(src)
+    photos = read_yfcc_metadata(src, bbox=COLORADO_BBOX)
+    for name in ("photos.parquet", "photos.csv"):
+        out = str(tmp_path / name)
+        save_photos(photos, out)
+        loaded = load_photos(out)
+        assert len(loaded) == len(photos)
+        assert set(loaded["photo_id"]) == set(photos["photo_id"])
+
+
+# --- hotspots --------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def photos(tmp_path_factory):
+    path = str(tmp_path_factory.mktemp("yfcc") / "yfcc.tsv")
+    write_tsv(path)
+    return read_yfcc_metadata(path, bbox=COLORADO_BBOX)
+
+
+def test_hotspots_count_photographers_not_photos(photos):
+    result = compute_hotspots(photos, resolution=1000.0, min_label_photographers=1, min_hex_photographers=1)
+    prolific = photos[photos["user_id"] == PROLIFIC_USER]
+    assert len(prolific) == 300
+
+    # The prolific user's hex has ~300 photos but a single photographer.
+    top_by_photos = result.hexes.sort_values("photos", ascending=False).iloc[0]
+    assert top_by_photos["photos"] >= 290
+    assert top_by_photos["photographers"] == 1
+
+    backyard = result.label_counts[result.label_counts["label"] == "backyard"]
+    assert backyard["photographers"].sum() <= len(backyard)  # one photographer per hex
+
+
+def test_hotspots_rank_landmark_tags_above_diffuse_tags(photos):
+    result = compute_hotspots(photos, resolution=1000.0, min_label_photographers=5, min_hex_photographers=1)
+    ranking = result.ranking.set_index("label")
+
+    assert "iphone" not in ranking.index and "2012" not in ranking.index
+    assert "backyard" not in ranking.index  # only one photographer
+    landmark_tags = {tag for _, _, tags in LANDMARKS.values() for tag in tags}
+    top = set(result.ranking.head(len(landmark_tags))["label"])
+    assert len(top & landmark_tags) >= len(landmark_tags) - 2
+    assert ranking.loc["maroon bells", "morans_i"] > ranking.loc["colorado", "morans_i"]
+    assert ranking.loc["maroon bells", "photographers"] == 30
+
+
+def test_hotspots_hex_geometry(photos):
+    result = compute_hotspots(photos, resolution=1000.0, min_label_photographers=5, min_hex_photographers=1)
+    lon0, lat0, _ = LANDMARKS["red_rocks"]
+    nearest = result.hexes.assign(d=np.hypot(result.hexes["lon"] - lon0, result.hexes["lat"] - lat0)).nsmallest(1, "d")
+    assert nearest["d"].iloc[0] < 0.01  # hex center within ~1 km of the landmark
+
+    # Hex neighbors are exactly one resolution apart.
+    adj = result.adjacency.tocoo()
+    centers = result.hexes.set_index("hex_id").loc[result.stats_hex_ids, ["x", "y"]].to_numpy()
+    if adj.nnz:
+        d = np.hypot(*(centers[adj.row] - centers[adj.col]).T)
+        np.testing.assert_allclose(d, 1000.0, rtol=1e-6)
+
+
+def test_save_and_load_hotspots(tmp_path, photos):
+    result = compute_hotspots(photos, resolution=2000.0, min_label_photographers=5, min_hex_photographers=1)
+    save_hotspots(result, str(tmp_path / "out"), extra_meta={"input": "fixture"})
+    loaded = load_hotspots(str(tmp_path / "out"))
+    assert len(loaded["hexes"]) == len(result.hexes)
+    assert loaded["meta"]["resolution"] == 2000.0
+    assert loaded["meta"]["input"] == "fixture"
+    assert list(loaded["ranking"]["label"]) == list(result.ranking["label"])
+
+
+def test_hotspots_empty_input_raises():
+    with pytest.raises(ValueError):
+        compute_hotspots(pd.DataFrame(columns=["photo_id", "user_id", "lon", "lat", "tags"]))
+
+
+# --- CLI -------------------------------------------------------------------
+
+def test_cli_ingest_and_hotspots(tmp_path):
+    runner = CliRunner()
+    src = str(tmp_path / "yfcc.tsv")
+    photos_path = str(tmp_path / "photos.parquet")
+    out_dir = str(tmp_path / "hotspots")
+    write_tsv(src)
+
+    result = runner.invoke(app, ["ingest-yfcc", "--input", src, "--output", photos_path, "--bbox", "colorado"])
+    assert result.exit_code == 0, result.output
+    assert os.path.exists(photos_path)
+
+    result = runner.invoke(app, [
+        "hotspots", "--input", photos_path, "--output-dir", out_dir,
+        "--min-label-photographers", "5", "--min-hex-photographers", "1", "--top-n", "5",
+    ])
+    assert result.exit_code == 0, result.output
+    assert "Spatially Clustered Tags" in result.output
+    for name in ("hexes.parquet", "label_counts.parquet", "ranking.csv", "meta.json"):
+        assert os.path.exists(os.path.join(out_dir, name))
+
+
+def test_hex_polygons_match_hex_size(photos):
+    from spatial_pipeline.geo import project_lonlat
+    from spatial_pipeline.hotspots import hex_polygons_lonlat
+
+    result = compute_hotspots(photos, resolution=1000.0, min_label_photographers=5, min_hex_photographers=1)
+    hexes = result.hexes.head(5)
+    rings = hex_polygons_lonlat(hexes["x"].to_numpy(), hexes["y"].to_numpy(), 1000.0)
+    assert len(rings) == 5 and all(len(r) == 6 for r in rings)
+    for ring, (_, h) in zip(rings, hexes.iterrows()):
+        vx, vy = project_lonlat(np.array([p[0] for p in ring]), np.array([p[1] for p in ring]))
+        np.testing.assert_allclose(np.hypot(vx - h["x"], vy - h["y"]), 1000.0 / np.sqrt(3.0), rtol=1e-6)
+
+
+def test_streamlit_app_renders(tmp_path, photos, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    out_dir = str(tmp_path / "hotspots")
+    save_hotspots(compute_hotspots(photos, min_label_photographers=5, min_hex_photographers=1), out_dir)
+    monkeypatch.setenv("HOTSPOTS_DIR", out_dir)
+    app_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "app.py")
+
+    at = AppTest.from_file(app_path, default_timeout=60).run()
+    assert not at.exception
+    assert at.metric[0].value == f"{len(photos):,}"
+
+    at.selectbox[0].select("red rocks").run()
+    assert not at.exception
+    assert not at.warning

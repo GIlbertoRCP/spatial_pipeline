@@ -1,8 +1,8 @@
 """
 I/O, coordinate ingestion, zero-copy PyArrow ingestion, and AnnData / Zarr storage interop.
 
-This module provides routines for downloading public spatial transcriptomics datasets,
-loading high-throughput coordinates via PyArrow / Polars, and bi-directional conversion
+This module provides routines for downloading public datasets, loading labeled point
+coordinates via PyArrow / Polars, and bi-directional conversion
 between binned matrices, spatial graphs, AnnData (.h5ad), and Zarr stores.
 """
 
@@ -115,17 +115,16 @@ def download_dataset(url: str, output_dir: str) -> str:
     return download_path
 
 
-def load_coordinates(file_path: str, min_qv: float = 20.0) -> pd.DataFrame:
+def load_coordinates(file_path: str) -> pd.DataFrame:
     """
-    Loads spatial coordinates from a transcripts CSV, compressed CSV, or Parquet file.
+    Loads labeled 2D points from a CSV or Parquet file with 'x', 'y' and 'label' columns.
     Attempts to use Polars for fast loading, falling back to Pandas.
 
     Args:
-        file_path: Path to the transcripts CSV/Parquet file.
-        min_qv: Minimum quality value (QV) threshold. Transcripts below this threshold are filtered out.
+        file_path: Path to the CSV/Parquet file.
 
     Returns:
-        pd.DataFrame: DataFrame with standardized columns: ['x', 'y', 'gene'].
+        pd.DataFrame: DataFrame with standardized columns: ['x', 'y', 'label'].
 
     Raises:
         FileNotFoundError: If the specified file does not exist.
@@ -133,52 +132,18 @@ def load_coordinates(file_path: str, min_qv: float = 20.0) -> pd.DataFrame:
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    # 10x Genomics Xenium transcript column mappings
-    column_mapping = {
-        "x_location": "x",
-        "y_location": "y",
-        "feature_name": "gene",
-        "x": "x",
-        "y": "y",
-        "gene": "gene",
-        "qv": "qv"
-    }
+    columns = ["x", "y", "label"]
+    is_parquet = file_path.endswith(".parquet")
 
     if HAS_POLARS and pl is not None:
-        if file_path.endswith(".parquet"):
-            df_pl = pl.read_parquet(file_path)
-        else:
-            df_pl = pl.read_csv(file_path)
-
-        present_cols = [c for c in column_mapping if c in df_pl.columns]
-        df_pl = df_pl.select(present_cols)
-        rename_dict = {c: column_mapping[c] for c in present_cols}
-        df_pl = df_pl.rename(rename_dict)
-
-        if "qv" in df_pl.columns:
-            df_pl = df_pl.filter(pl.col("qv") >= min_qv)
-            df_pl = df_pl.drop("qv")
-
+        df_pl = pl.read_parquet(file_path, columns=columns) if is_parquet else pl.read_csv(file_path, columns=columns)
         pdf = df_pl.to_pandas()
     else:
-        if file_path.endswith(".parquet"):
-            df_pd = pd.read_parquet(file_path)
-        else:
-            df_pd = pd.read_csv(file_path)
-
-        present_cols = [c for c in column_mapping if c in df_pd.columns]
-        df_pd = df_pd[present_cols]
-        df_pd = df_pd.rename(columns=column_mapping)
-
-        if "qv" in df_pd.columns:
-            df_pd = df_pd[df_pd["qv"] >= min_qv]
-            df_pd = df_pd.drop(columns=["qv"])
-
-        pdf = df_pd
+        pdf = pd.read_parquet(file_path, columns=columns) if is_parquet else pd.read_csv(file_path, usecols=columns)
 
     pdf["x"] = pdf["x"].astype("float64")
     pdf["y"] = pdf["y"].astype("float64")
-    pdf["gene"] = pdf["gene"].astype("category")
+    pdf["label"] = pdf["label"].astype("category")
     return pdf
 
 
@@ -190,7 +155,7 @@ def load_transcript_arrow(file_path: str) -> pa.Table:
         file_path: Path to spatial transcripts CSV or Parquet file.
 
     Returns:
-        pa.Table: PyArrow Table containing columns 'x', 'y', 'gene'.
+        pa.Table: PyArrow Table containing columns 'x', 'y', 'label'.
 
     Raises:
         ImportError: If pyarrow is not installed.
@@ -204,15 +169,15 @@ def load_transcript_arrow(file_path: str) -> pa.Table:
 
     str_path = str(path)
     if str_path.endswith(".parquet"):
-        table = pa_parquet.read_table(str_path, columns=["x", "y", "gene"])
+        table = pa_parquet.read_table(str_path, columns=["x", "y", "label"])
     else:
         convert_options = pa_csv.ConvertOptions(
             column_types={
                 "x": pa.float32(),
                 "y": pa.float32(),
-                "gene": pa.string()
+                "label": pa.string()
             },
-            include_columns=["x", "y", "gene"]
+            include_columns=["x", "y", "label"]
         )
         table = pa_csv.read_csv(str_path, convert_options=convert_options)
     return table
@@ -223,18 +188,18 @@ def arrow_table_to_numpy(table: pa.Table) -> dict[str, np.ndarray]:
     Converts PyArrow Table columns into NumPy arrays using zero-copy memory transfers where possible.
 
     Args:
-        table: PyArrow Table with columns 'x', 'y', 'gene'.
+        table: PyArrow Table with columns 'x', 'y', 'label'.
 
     Returns:
-        dict[str, np.ndarray]: Dictionary with keys 'x', 'y', 'gene' mapped to 1D NumPy arrays.
+        dict[str, np.ndarray]: Dictionary with keys 'x', 'y', 'label' mapped to 1D NumPy arrays.
     """
     if not HAS_PYARROW:
         raise ImportError("PyArrow is not installed.")
 
     x_arr = table["x"].to_numpy(zero_copy_only=False)
     y_arr = table["y"].to_numpy(zero_copy_only=False)
-    gene_arr = table["gene"].to_numpy(zero_copy_only=False)
-    return {"x": x_arr, "y": y_arr, "gene": gene_arr}
+    label_arr = table["label"].to_numpy(zero_copy_only=False)
+    return {"x": x_arr, "y": y_arr, "label": label_arr}
 
 
 def load_transcript_data(file_path: str, use_arrow: bool = False) -> pd.DataFrame:
@@ -246,7 +211,7 @@ def load_transcript_data(file_path: str, use_arrow: bool = False) -> pd.DataFram
         use_arrow: If True, uses PyArrow engine for zero-copy memory loading.
 
     Returns:
-        pd.DataFrame: Loaded DataFrame with 'x', 'y', and 'gene' columns.
+        pd.DataFrame: Loaded DataFrame with 'x', 'y', and 'label' columns.
     """
     path = Path(file_path)
     if not path.exists():
@@ -255,20 +220,20 @@ def load_transcript_data(file_path: str, use_arrow: bool = False) -> pd.DataFram
     if use_arrow and HAS_PYARROW:
         table = load_transcript_arrow(file_path)
         df = table.to_pandas(types_mapper=None)
-        df["gene"] = df["gene"].astype("category")
+        df["label"] = df["label"].astype("category")
         return df
 
     df = pd.read_csv(
         path,
-        usecols=["x", "y", "gene"],
-        dtype={"x": "float32", "y": "float32", "gene": "category"}
+        usecols=["x", "y", "label"],
+        dtype={"x": "float32", "y": "float32", "label": "category"}
     )
     return df
 
 
 def generate_vectorized_mock_data(file_path: str, num_molecules: int = 15000) -> None:
     """
-    Instantly generates thousands of synthetic spatial coordinates and gene labels
+    Instantly generates thousands of synthetic spatial coordinates and label labels
     using fully vectorized NumPy functions (no loops), then saves to a CSV.
 
     Args:
@@ -294,13 +259,13 @@ def generate_vectorized_mock_data(file_path: str, num_molecules: int = 15000) ->
     x = np.clip(np.concatenate([x_back, x_clust]), 10.0, 500.0)
     y = np.clip(np.concatenate([y_back, y_clust]), 10.0, 500.0)
 
-    gene_list = ["GAPDH", "ACTB", "MALAT1", "EPCAM", "CD3D"]
-    genes = np.random.choice(gene_list, size=num_molecules)
+    label_list = ["alpha", "beta", "gamma", "delta", "epsilon"]
+    labels = np.random.choice(label_list, size=num_molecules)
 
     df = pd.DataFrame({
         "x": x.astype(np.float32),
         "y": y.astype(np.float32),
-        "gene": genes
+        "label": labels
     })
     df.to_csv(file_path, index=False)
 
@@ -308,7 +273,7 @@ def generate_vectorized_mock_data(file_path: str, num_molecules: int = 15000) ->
 def to_anndata(
     sparse_counts: Any,
     bin_coords: np.ndarray,
-    genes: np.ndarray | None = None,
+    labels: np.ndarray | None = None,
     adjacency_matrix: Any = None,
     laplacian_matrix: Any = None,
     compute_svg: bool = False,
@@ -319,9 +284,9 @@ def to_anndata(
     into an AnnData object following Scanpy and Squidpy ecosystem conventions.
 
     Args:
-        sparse_counts: Binned gene expression counts matrix of shape (num_bins, num_genes).
+        sparse_counts: Binned label counts matrix of shape (num_bins, num_labels).
         bin_coords: Array of shape (num_bins, 2) holding Cartesian (x, y) coordinates of bin centers.
-        genes: 1D array of gene names (length num_genes).
+        labels: 1D array of label names (length num_labels).
         adjacency_matrix: Spatial adjacency matrix of shape (num_bins, num_bins). Stored in `obsp['spatial_connectivities']`.
         laplacian_matrix: Graph Laplacian matrix of shape (num_bins, num_bins). Stored in `obsp['spatial_laplacian']`.
         compute_svg: If True, calculates Moran's I & Geary's C spatial autocorrelation metrics and stores in `var`.
@@ -336,8 +301,8 @@ def to_anndata(
     adata = ad.AnnData(X=sparse_counts)
     adata.obsm["spatial"] = np.asarray(bin_coords, dtype=np.float32)
 
-    if genes is not None:
-        adata.var_names = np.asarray(genes).astype(str)
+    if labels is not None:
+        adata.var_names = np.asarray(labels).astype(str)
 
     if adjacency_matrix is not None:
         adata.obsp["spatial_connectivities"] = adjacency_matrix
@@ -356,34 +321,34 @@ def to_anndata(
     if metadata is not None:
         adata.uns["spatial_pipeline"] = metadata
     else:
-        adata.uns["spatial_pipeline"] = {"version": "0.4.0"}
+        adata.uns["spatial_pipeline"] = {"version": "0.5.0"}
 
     return adata
 
 
 def from_anndata(adata: ad.AnnData) -> dict[str, Any]:
     """
-    Extracts sparse count matrix, spatial coordinates, gene names, and adjacency graphs from an AnnData object.
+    Extracts sparse count matrix, spatial coordinates, label names, and adjacency graphs from an AnnData object.
 
     Args:
         adata: Input AnnData object.
 
     Returns:
-        dict[str, Any]: Dictionary containing 'counts', 'bin_coords', 'genes', 'adjacency_matrix', and 'laplacian_matrix'.
+        dict[str, Any]: Dictionary containing 'counts', 'bin_coords', 'labels', 'adjacency_matrix', and 'laplacian_matrix'.
     """
     if not HAS_ANNDATA:
         raise ImportError("anndata package is required.")
 
     counts = adata.X
     bin_coords = adata.obsm.get("spatial", np.empty((adata.n_obs, 2)))
-    genes = np.array(adata.var_names)
+    labels = np.array(adata.var_names)
     adjacency = adata.obsp.get("spatial_connectivities", None)
     laplacian = adata.obsp.get("spatial_laplacian", None)
 
     return {
         "counts": counts,
         "bin_coords": bin_coords,
-        "genes": genes,
+        "labels": labels,
         "adjacency_matrix": adjacency,
         "laplacian_matrix": laplacian
     }

@@ -141,7 +141,7 @@ def partition_dataset_to_tiles(file_path: str, tile_size: float, partition_dir: 
 
     print(f"[*] Partitioning dataset {file_path} into {tile_size} um spatial tiles...")
 
-    global_genes_set: set[str] = set()
+    global_labels_set: set[str] = set()
     x_min = float("inf")
     y_min = float("inf")
 
@@ -151,8 +151,8 @@ def partition_dataset_to_tiles(file_path: str, tile_size: float, partition_dir: 
         x_min = min(x_min, chunk["x"].min())
         y_min = min(y_min, chunk["y"].min())
 
-        # Collect all unique genes in the dataset
-        global_genes_set.update(chunk["gene"].unique())
+        # Collect all unique labels in the dataset
+        global_labels_set.update(chunk["label"].unique())
 
         # Ensure coordinates are float and calculate tile grid coordinates
         tx = np.floor(chunk["x"].to_numpy() / tile_size).astype(int)
@@ -168,9 +168,9 @@ def partition_dataset_to_tiles(file_path: str, tile_size: float, partition_dir: 
                 header=not os.path.exists(tile_file)
             )
 
-    # Save global offset and gene list to the partition directory
-    global_genes = np.array(sorted(global_genes_set))
-    np.save(os.path.join(partition_dir, "genes.npy"), global_genes)
+    # Save global offset and label list to the partition directory
+    global_labels = np.array(sorted(global_labels_set))
+    np.save(os.path.join(partition_dir, "labels.npy"), global_labels)
     np.save(os.path.join(partition_dir, "offset.npy"), np.array([x_min, y_min]))
 
     print(f"[+] Dataset partitioning complete. Saved in directory: {partition_dir}")
@@ -211,7 +211,7 @@ def load_tile_with_halo(
                 dfs.append(sub_df)
 
     if not dfs:
-        return pd.DataFrame(columns=["x", "y", "gene", "src_tile_x", "src_tile_y"])
+        return pd.DataFrame(columns=["x", "y", "label", "src_tile_x", "src_tile_y"])
 
     df_combined = pd.concat(dfs, ignore_index=True)
 
@@ -253,11 +253,11 @@ def process_tile_out_of_core(
         partition_dir: Directory containing tile partition CSVs.
         tmp_out_dir: Output scratch directory for intermediate binned matrices.
     """
-    genes_path = os.path.join(partition_dir, "genes.npy")
+    labels_path = os.path.join(partition_dir, "labels.npy")
     offset_path = os.path.join(partition_dir, "offset.npy")
-    if not os.path.exists(genes_path) or not os.path.exists(offset_path):
+    if not os.path.exists(labels_path) or not os.path.exists(offset_path):
         raise FileNotFoundError("Global partition metadata not found. Run partitioning first.")
-    unique_genes = np.load(genes_path, allow_pickle=True)
+    unique_labels = np.load(labels_path, allow_pickle=True)
     x_min, y_min = np.load(offset_path)
 
     # 1. Ingest core coordinates + halo
@@ -316,13 +316,13 @@ def process_tile_out_of_core(
 
     _, inverse_owned = np.unique(bin_coords[owned_transcripts_mask], axis=0, return_inverse=True)
 
-    gene_series = pd.Categorical(df_owned["gene"], categories=unique_genes)
-    gene_codes = gene_series.codes
+    label_series = pd.Categorical(df_owned["label"], categories=unique_labels)
+    label_codes = label_series.codes
 
     counts = np.ones(len(df_owned), dtype=np.int32)
     sparse_counts = coo_matrix(
-        (counts, (inverse_owned, gene_codes)),
-        shape=(len(owned_bins), len(unique_genes)),
+        (counts, (inverse_owned, label_codes)),
+        shape=(len(owned_bins), len(unique_labels)),
         dtype=np.int32
     ).tocsr()
 
@@ -348,7 +348,7 @@ def process_tile_out_of_core(
 
     scipy.sparse.save_npz(os.path.join(tmp_out_dir, f"counts_{prefix}.npz"), sparse_counts)
     np.save(os.path.join(tmp_out_dir, f"bins_{prefix}.npy"), owned_bins)
-    np.save(os.path.join(tmp_out_dir, f"genes_{prefix}.npy"), unique_genes)
+    np.save(os.path.join(tmp_out_dir, f"labels_{prefix}.npy"), unique_labels)
     np.save(os.path.join(tmp_out_dir, f"edges_{prefix}.npy"), global_edges)
     np.save(os.path.join(tmp_out_dir, "offset.npy"), np.array([x_min, y_min]))
 
@@ -367,23 +367,23 @@ def stitch_out_of_core_results(
 
     Returns:
         tuple[csr_matrix, np.ndarray, np.ndarray, csr_matrix, csr_matrix]:
-            (global_expression, global_centers, global_genes, adjacency_matrix, laplacian_matrix).
+            (global_expression, global_centers, global_labels, adjacency_matrix, laplacian_matrix).
     """
     all_bins = []
     all_counts = []
-    global_genes = None
+    global_labels = None
 
     for f in os.listdir(tmp_out_dir):
         if f.startswith("bins_") and f.endswith(".npy"):
             prefix = f[5:-4]
             bins = np.load(os.path.join(tmp_out_dir, f))
             counts = scipy.sparse.load_npz(os.path.join(tmp_out_dir, f"counts_{prefix}.npz"))
-            genes = np.load(os.path.join(tmp_out_dir, f"genes_{prefix}.npy"), allow_pickle=True)
+            labels = np.load(os.path.join(tmp_out_dir, f"labels_{prefix}.npy"), allow_pickle=True)
 
             all_bins.append(bins)
             all_counts.append(counts)
-            if global_genes is None:
-                global_genes = genes
+            if global_labels is None:
+                global_labels = labels
 
     if not all_bins:
         raise ValueError("No intermediate results found to stitch.")
@@ -460,7 +460,7 @@ def stitch_out_of_core_results(
     )
     laplacian_matrix = degree_matrix - adjacency_matrix
 
-    return global_expression, global_centers, global_genes, adjacency_matrix, laplacian_matrix
+    return global_expression, global_centers, global_labels, adjacency_matrix, laplacian_matrix
 
 
 def _process_single_tile_wrapper(args: tuple[int, int, float, float, float, str, str]) -> None:
@@ -607,13 +607,13 @@ def dask_bin_transcripts(
         blocksize: Partition chunk size for Dask CSV reading (e.g. '64MB').
 
     Returns:
-        tuple[csr_matrix, np.ndarray, np.ndarray]: (sparse_counts, bin_centers, unique_genes).
+        tuple[csr_matrix, np.ndarray, np.ndarray]: (sparse_counts, bin_centers, unique_labels).
     """
     if not HAS_DASK or dd is None:
         raise ImportError("Dask is required. Install with `pip install 'dask[dataframe]'`.")
 
     if isinstance(file_or_df, str):
-        ddf = dd.read_csv(file_or_df, usecols=["x", "y", "gene"], blocksize=blocksize)
+        ddf = dd.read_csv(file_or_df, usecols=["x", "y", "label"], blocksize=blocksize)
     else:
         ddf = dd.from_pandas(file_or_df, npartitions=max(1, len(file_or_df) // 50000))
 
@@ -626,27 +626,27 @@ def dask_bin_transcripts(
     ddf["bin_y"] = ((ddf["y"] - y_min) / resolution).astype(int)
 
     # Distributed groupby aggregation of counts
-    grouped = ddf.groupby(["bin_x", "bin_y", "gene"]).size().reset_index()
-    grouped.columns = ["bin_x", "bin_y", "gene", "count"]
+    grouped = ddf.groupby(["bin_x", "bin_y", "label"]).size().reset_index()
+    grouped.columns = ["bin_x", "bin_y", "label", "count"]
     agg_df = grouped.compute()
 
     if len(agg_df) == 0:
         return csr_matrix((0, 0), dtype=np.int32), np.empty((0, 2), dtype=np.float32), np.array([])
 
     unique_bins_2d = agg_df[["bin_x", "bin_y"]].drop_duplicates().to_numpy()
-    unique_genes = np.array(sorted(agg_df["gene"].unique()))
+    unique_labels = np.array(sorted(agg_df["label"].unique()))
 
-    # Build coordinate and gene maps
+    # Build coordinate and label maps
     bin_map = {tuple(b): i for i, b in enumerate(unique_bins_2d)}
-    gene_map = {g: j for j, g in enumerate(unique_genes)}
+    label_map = {g: j for j, g in enumerate(unique_labels)}
 
     row_indices = np.array([bin_map[(r.bin_x, r.bin_y)] for r in agg_df.itertuples()], dtype=np.int32)
-    col_indices = np.array([gene_map[r.gene] for r in agg_df.itertuples()], dtype=np.int32)
+    col_indices = np.array([label_map[r.label] for r in agg_df.itertuples()], dtype=np.int32)
     counts = agg_df["count"].to_numpy(dtype=np.int32)
 
     sparse_matrix = coo_matrix(
         (counts, (row_indices, col_indices)),
-        shape=(len(unique_bins_2d), len(unique_genes)),
+        shape=(len(unique_bins_2d), len(unique_labels)),
         dtype=np.int32
     ).tocsr()
 
@@ -661,7 +661,7 @@ def dask_bin_transcripts(
         sparse_matrix = sparse_matrix[keep_mask]
         bin_centers = bin_centers[keep_mask]
 
-    return sparse_matrix, bin_centers, unique_genes
+    return sparse_matrix, bin_centers, unique_labels
 
 
 def dask_compute_spatial_metrics(
@@ -669,7 +669,7 @@ def dask_compute_spatial_metrics(
     chunk_size: int = 10000
 ) -> dict[str, np.ndarray]:
     """
-    Computes out-of-core gene expression statistics (mean, variance, sparsity)
+    Computes out-of-core label counts statistics (mean, variance, sparsity)
     across a chunked Zarr hierarchy using Dask Arrays.
 
     Args:
@@ -678,9 +678,9 @@ def dask_compute_spatial_metrics(
 
     Returns:
         dict[str, np.ndarray]: Dictionary containing:
-            - 'mean': 1D array of mean expression per gene.
-            - 'var': 1D array of variance per gene.
-            - 'sparsity': 1D array of fractional non-zero bins per gene.
+            - 'mean': 1D array of mean expression per label.
+            - 'var': 1D array of variance per label.
+            - 'sparsity': 1D array of fractional non-zero bins per label.
     """
     if not HAS_DASK or da is None:
         raise ImportError("Dask is required. Install with `pip install dask`.")

@@ -1,490 +1,141 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import scipy.sparse
-import plotly.graph_objects as go
-import plotly.express as px
-from io import BytesIO, StringIO
+"""
+Streamlit map of photo hotspots produced by `spatial-pipeline hotspots`.
+
+Run with `spatial-pipeline ui` or `streamlit run app.py`.
+"""
+
+from __future__ import annotations
+
 import os
 
-from spatial_pipeline.binning import compute_square_bins
-from spatial_pipeline.graphs import build_spatial_graph, compute_laplacian_spectrum, compute_spatially_variable_genes
-from spatial_pipeline.io import HAS_ANNDATA, to_anndata
+import numpy as np
+import pandas as pd
+import pydeck as pdk
+import streamlit as st
 
-# Configure Streamlit page options
-st.set_page_config(
-    page_title="Spatial Transcriptomics Preprocessing & Visualizer",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+from spatial_pipeline.hotspots import hex_polygons_lonlat, load_hotspots
 
-# Custom header styling
-st.markdown(
-    """
-    <style>
-    .glass-header {
-        background: rgba(255, 255, 255, 0.05);
-        padding: 24px;
-        border-radius: 12px;
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        margin-bottom: 25px;
-    }
-    .metric-card {
-        background: rgba(255, 255, 255, 0.03);
-        padding: 16px;
-        border-radius: 8px;
-        border: 1px solid rgba(255, 255, 255, 0.05);
-        text-align: center;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+st.set_page_config(page_title="Photo Hotspots", layout="wide")
 
-st.markdown(
-    """
-    <div class="glass-header">
-        <h1 style="color: #ECECF1; font-family: 'Outfit', sans-serif; font-weight: 700; margin: 0; font-size: 2.2rem;">Spatial Transcriptomics Preprocessing Dashboard</h1>
-        <p style="color: #9EA0A3; font-family: 'Inter', sans-serif; font-size: 1.05rem; margin-top: 6px; margin-bottom: 0;">
-            Interactive spatial grid binning, AnnData .h5ad ecosystem export, PyG GNN support, & Graph Laplacian Spectral Visualizer.
-        </p>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+ALL_PHOTOS = "(all photos)"
 
-# Cached generation of mock coordinate dataset
+
 @st.cache_data
-def get_mock_dataframe() -> pd.DataFrame:
-    np.random.seed(42)
-    n_molecules = 20000
-    
-    # Coordinates in 500x500 micron space
-    x = np.random.uniform(50.0, 550.0, n_molecules)
-    y = np.random.uniform(50.0, 550.0, n_molecules)
-    
-    # Create spatial clusters simulating cellular dense zones
-    n_clusters = 8
-    cluster_centers = np.random.uniform(120.0, 480.0, (n_clusters, 2))
-    cluster_sizes = np.random.randint(800, 2000, n_clusters)
-    
-    for i in range(n_clusters):
-        cx, cy = cluster_centers[i]
-        size = cluster_sizes[i]
-        c_noise_x = np.random.normal(0.0, 18.0, size)
-        c_noise_y = np.random.normal(0.0, 18.0, size)
-        x = np.concatenate([x, cx + c_noise_x])
-        y = np.concatenate([y, cy + c_noise_y])
-        
-    x = np.clip(x, 50.0, 550.0)
-    y = np.clip(y, 50.0, 550.0)
-    
-    # Assigned panel genes
-    gene_panel = ["GAPDH", "ACTB", "EPCAM", "CD3D", "MS4A1", "ERBB2", "KRT19", "PECAM1", "COL1A1", "VIM"]
-    gene_probs = np.random.dirichlet(np.ones(len(gene_panel)))
-    assigned_genes = np.random.choice(gene_panel, size=len(x), p=gene_probs)
-    
-    return pd.DataFrame({
-        "x": x.astype(np.float32),
-        "y": y.astype(np.float32),
-        "gene": pd.Series(assigned_genes, dtype="category")
-    })
+def _load(out_dir: str) -> dict[str, object]:
+    return load_hotspots(out_dir)
 
-# Sidebar controls
-st.sidebar.markdown("<h3 style='margin-bottom:0;'>Data Source Ingestion</h3>", unsafe_allow_html=True)
-data_source = st.sidebar.radio(
-    "Choose transcript dataset:",
-    ["Use Mock Spatial Coordinates", "Upload Molecule Coordinates CSV"]
+
+@st.cache_data
+def _polygons(x: np.ndarray, y: np.ndarray, resolution: float, crs: str) -> list[list[list[float]]]:
+    return hex_polygons_lonlat(x, y, resolution, crs)
+
+
+def _colors(values: np.ndarray) -> np.ndarray:
+    """Maps values to a light-yellow -> deep-red ramp with log scaling (RGBA, 0-255)."""
+    v = np.log1p(np.asarray(values, dtype=np.float64))
+    t = v / v.max() if len(v) and v.max() > 0 else np.zeros_like(v)
+    low = np.array([255, 237, 160])
+    high = np.array([189, 0, 38])
+    rgb = low[None, :] + (high - low)[None, :] * t[:, None]
+    alpha = np.full((len(t), 1), 190)
+    return np.hstack([rgb, alpha]).astype(int)
+
+
+st.title("Photo Hotspots")
+st.caption("Where people photograph, counted by unique photographers per hex. Tags ranked by spatial clustering (Moran's I).")
+
+with st.sidebar:
+    out_dir = st.text_input("Hotspot output directory", value=os.environ.get("HOTSPOTS_DIR", "hotspots"))
+
+if not os.path.exists(os.path.join(out_dir, "meta.json")):
+    st.info(
+        f"No hotspot outputs found in `{out_dir}`. Create them with:\n\n"
+        "```\nspatial-pipeline ingest-yfcc --input <yfcc metadata> --output photos.parquet --bbox colorado\n"
+        "spatial-pipeline hotspots --input photos.parquet --output-dir hotspots\n```"
+    )
+    st.stop()
+
+data = _load(out_dir)
+hexes: pd.DataFrame = data["hexes"]  # type: ignore[assignment]
+label_counts: pd.DataFrame = data["label_counts"]  # type: ignore[assignment]
+ranking: pd.DataFrame = data["ranking"]  # type: ignore[assignment]
+meta: dict = data["meta"]  # type: ignore[assignment]
+
+with st.sidebar:
+    significant = ranking[ranking["fdr_p_value"] < 0.05]
+    options = [ALL_PHOTOS] + significant["label"].astype(str).tolist()
+    tag = st.selectbox("Tag (significantly clustered, strongest first)", options)
+    min_photographers = st.slider("Minimum photographers per hex", 1, 20, 1)
+    st.caption(f"{len(significant):,} of {len(ranking):,} analyzed tags are significantly clustered (FDR < 0.05).")
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Photos", f"{meta['num_photos']:,}")
+c2.metric("Photographers (sum over hexes)", f"{int(hexes['photographers'].sum()):,}")
+c3.metric("Active hexes", f"{meta['num_hexes']:,}")
+c4.metric("Hex size", f"{meta['resolution'] / 1000:g} km")
+
+if tag == ALL_PHOTOS:
+    view = hexes.assign(value=hexes["photographers"])
+else:
+    per_tag = label_counts[label_counts["label"] == tag][["hex_id", "photographers"]]
+    view = hexes.drop(columns="photographers").merge(per_tag, on="hex_id")
+    view = view.assign(value=view["photographers"])
+view = view[view["value"] >= min_photographers].reset_index(drop=True)
+
+if view.empty:
+    st.warning("No hexes match the current filters.")
+    st.stop()
+
+view["polygon"] = _polygons(view["x"].to_numpy(), view["y"].to_numpy(), float(meta["resolution"]), str(meta["crs"]))
+view[["r_", "g_", "b_", "a_"]] = _colors(view["value"].to_numpy())
+
+layer = pdk.Layer(
+    "PolygonLayer",
+    data=view[["polygon", "value", "photos", "lon", "lat", "r_", "g_", "b_", "a_"]],
+    get_polygon="polygon",
+    get_fill_color="[r_, g_, b_, a_]",
+    get_line_color=[80, 80, 80, 80],
+    line_width_min_pixels=0.5,
+    pickable=True,
+)
+# Hex-center dots with a minimum on-screen size keep small hexes visible when zoomed out.
+dots = pdk.Layer(
+    "ScatterplotLayer",
+    data=view[["lon", "lat", "r_", "g_", "b_", "a_"]],
+    get_position="[lon, lat]",
+    get_radius=float(meta["resolution"]) / 2.0,
+    radius_min_pixels=2.5,
+    get_fill_color="[r_, g_, b_, a_]",
+)
+# Fit the view to the central 95% of hexes (Web Mercator: 256 px spans 360 degrees at zoom 0).
+lon_lo, lon_hi = view["lon"].quantile([0.025, 0.975])
+lat_lo, lat_hi = view["lat"].quantile([0.025, 0.975])
+lon_span = max(lon_hi - lon_lo, (lat_hi - lat_lo) / np.cos(np.deg2rad((lat_lo + lat_hi) / 2)), 0.02)
+view_state = pdk.ViewState(
+    longitude=float((lon_lo + lon_hi) / 2),
+    latitude=float((lat_lo + lat_hi) / 2),
+    zoom=float(np.clip(np.log2(700 * 360 / (256 * lon_span)) - 0.3, 3, 13)),
+)
+st.pydeck_chart(
+    pdk.Deck(
+        layers=[dots, layer],
+        initial_view_state=view_state,
+        map_provider="carto",
+        map_style="light",
+        tooltip={"text": "{value} photographers\n{photos} photos in hex\n{lat}, {lon}"},
+    ),
+    height=620,
 )
 
-df = None
-if data_source == "Use Mock Spatial Coordinates":
-    df = get_mock_dataframe()
-    st.sidebar.success(f"Loaded synthetic tissue sample ({len(df):,} molecules).")
-else:
-    uploaded_file = st.sidebar.file_uploader(
-        "Upload coordinates CSV file (columns: x, y, gene):",
-        type=["csv", "gz"]
+left, right = st.columns(2)
+with left:
+    st.subheader("Top hexes")
+    top = view.nlargest(15, "value")[["value", "photos", "lat", "lon"]].rename(columns={"value": "photographers"})
+    top["map"] = [f"https://www.google.com/maps?q={la:.5f},{lo:.5f}" for la, lo in zip(top["lat"], top["lon"])]
+    st.dataframe(top, hide_index=True, column_config={"map": st.column_config.LinkColumn("map", display_text="open")})
+with right:
+    st.subheader("Most clustered tags")
+    st.dataframe(
+        ranking.head(50)[["label", "morans_i", "fdr_p_value", "photographers", "hexes"]],
+        hide_index=True,
     )
-    if uploaded_file is not None:
-        try:
-            df = pd.read_csv(
-                uploaded_file,
-                usecols=["x", "y", "gene"],
-                dtype={"x": "float32", "y": "float32", "gene": "category"}
-            )
-            st.sidebar.success(f"Ingested custom CSV ({len(df):,} molecules).")
-        except Exception as e:
-            st.sidebar.error(f"Error reading coordinate file: {e}")
-    else:
-        st.sidebar.info("Upload a molecule CSV to begin, or use the mock data option.")
-
-if df is not None:
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("<h3>Hyperparameters</h3>", unsafe_allow_html=True)
-    
-    resolution = st.sidebar.slider(
-        "Square Grid Resolution (D):",
-        min_value=2.0,
-        max_value=100.0,
-        value=20.0,
-        step=1.0,
-        help="The physical width of each grid block."
-    )
-    
-    max_dist = st.sidebar.slider(
-        "Adjacency Max Radius (T):",
-        min_value=5.0,
-        max_value=150.0,
-        value=30.0,
-        step=1.0,
-        help="Max distance to connect two bins in the spatial graph."
-    )
-    
-    min_counts = st.sidebar.slider(
-        "Min Bin Transcript Threshold:",
-        min_value=1,
-        max_value=50,
-        value=1,
-        step=1,
-        help="Filter out noisy bins with transcript count below this threshold."
-    )
-    
-    # Execute Pipeline
-    sparse_counts, bin_coords = compute_square_bins(df, resolution, min_counts=min_counts)
-    adj_matrix, laplacian_matrix = build_spatial_graph(bin_coords, max_dist)
-    
-    # Compute Analytics Metrics
-    n_molecules = len(df)
-    n_bins = sparse_counts.shape[0]
-    n_genes = sparse_counts.shape[1]
-    n_edges = adj_matrix.nnz // 2
-    sparsity = 100.0 * (1.0 - (sparse_counts.nnz / (n_bins * n_genes))) if (n_bins * n_genes) > 0 else 0.0
-    
-    # Render KPI Metric cards
-    cols = st.columns(5)
-    with cols[0]:
-        st.markdown(
-            f'<div class="metric-card"><div style="color: #9EA0A3; font-size: 0.85rem;">Molecules</div><div style="font-size: 1.6rem; font-weight: 700; color: #ECECF1;">{n_molecules:,}</div></div>', 
-            unsafe_allow_html=True
-        )
-    with cols[1]:
-        st.markdown(
-            f'<div class="metric-card"><div style="color: #9EA0A3; font-size: 0.85rem;">Active Bins</div><div style="font-size: 1.6rem; font-weight: 700; color: #ECECF1;">{n_bins:,}</div></div>', 
-            unsafe_allow_html=True
-        )
-    with cols[2]:
-        st.markdown(
-            f'<div class="metric-card"><div style="color: #9EA0A3; font-size: 0.85rem;">Genes</div><div style="font-size: 1.6rem; font-weight: 700; color: #ECECF1;">{n_genes}</div></div>', 
-            unsafe_allow_html=True
-        )
-    with cols[3]:
-        st.markdown(
-            f'<div class="metric-card"><div style="color: #9EA0A3; font-size: 0.85rem;">Graph Edges</div><div style="font-size: 1.6rem; font-weight: 700; color: #ECECF1;">{n_edges:,}</div></div>', 
-            unsafe_allow_html=True
-        )
-    with cols[4]:
-        st.markdown(
-            f'<div class="metric-card"><div style="color: #9EA0A3; font-size: 0.85rem;">Matrix Sparsity</div><div style="font-size: 1.6rem; font-weight: 700; color: #ECECF1;">{sparsity:.2f}%</div></div>', 
-            unsafe_allow_html=True
-        )
-        
-    st.markdown("<br>", unsafe_allow_html=True)
-    
-    # Visualization Tabs
-    tab_side_by_side, tab_molecules, tab_density, tab_graph, tab_spectrum, tab_svg, tab_exporter = st.tabs([
-        "Side-by-Side View",
-        "Molecules Map", 
-        "Binned Expression Density", 
-        "Spatial Network Overlay",
-        "Spectral Laplacian Analysis",
-        "Spatially Variable Genes (Moran's I)",
-        "Exporter & AnnData Interop"
-    ])
-    
-    total_counts = np.array(sparse_counts.sum(axis=1)).flatten() if n_bins > 0 else np.array([])
-
-    with tab_side_by_side:
-        st.subheader("Side-by-Side Comparison: Raw Transcripts vs. Binned Density")
-        c1, c2 = st.columns(2)
-        
-        with c1:
-            st.markdown("##### Raw Molecule Detections Scatter")
-            sample_df = df.sample(min(len(df), 15000), random_state=42)
-            fig_raw = px.scatter(
-                sample_df, x="x", y="y", color="gene",
-                template="plotly_dark", height=500
-            )
-            fig_raw.update_traces(marker=dict(size=3, opacity=0.7))
-            fig_raw.update_layout(xaxis=dict(scaleanchor="y", scaleratio=1), margin=dict(l=10, r=10, t=30, b=10))
-            st.plotly_chart(fig_raw, use_container_width=True)
-            
-        with c2:
-            st.markdown(f"##### Binned Density Heatmap (Resolution={resolution} um)")
-            fig_bin = go.Figure(data=go.Scattergl(
-                x=bin_coords[:, 0] if n_bins > 0 else [],
-                y=bin_coords[:, 1] if n_bins > 0 else [],
-                mode="markers",
-                marker=dict(
-                    size=10, color=total_counts, colorscale="Viridis", showscale=True,
-                    colorbar=dict(title="Counts")
-                )
-            ))
-            fig_bin.update_layout(template="plotly_dark", height=500, xaxis=dict(scaleanchor="y", scaleratio=1), margin=dict(l=10, r=10, t=30, b=10))
-            st.plotly_chart(fig_bin, use_container_width=True)
-
-    with tab_molecules:
-        st.subheader("Interactive Transcript Detections Map")
-        gene_options = ["All Genes"] + sorted(list(df["gene"].cat.categories))
-        selected_gene = st.selectbox("Select gene to highlight:", gene_options)
-        
-        if selected_gene == "All Genes":
-            plot_df = df.sample(min(len(df), 30000), random_state=42)
-            color_col = "gene"
-            title_text = "Spatial transcripts map (Max 30k random molecules shown)"
-        else:
-            plot_df = df[df["gene"] == selected_gene]
-            color_col = None
-            title_text = f"Spatial transcripts map for gene: {selected_gene} ({len(plot_df):,} detections)"
-            
-        fig_mol = px.scatter(
-            plot_df, x="x", y="y", color=color_col,
-            title=title_text, template="plotly_dark",
-            labels={"x": "X Position (um)", "y": "Y Position (um)"}
-        )
-        fig_mol.update_traces(marker=dict(size=4, opacity=0.7), selector=dict(mode="markers"))
-        fig_mol.update_layout(
-            width=900, height=700,
-            xaxis=dict(scaleanchor="y", scaleratio=1),
-            plot_bgcolor="#0E1117", paper_bgcolor="#0E1117"
-        )
-        st.plotly_chart(fig_mol, use_container_width=True)
-        
-    with tab_density:
-        st.subheader("Binned Molecule Densities")
-        fig_density = go.Figure(
-            data=go.Scattergl(
-                x=bin_coords[:, 0] if n_bins > 0 else [],
-                y=bin_coords[:, 1] if n_bins > 0 else [],
-                mode="markers",
-                marker=dict(
-                    size=12, color=total_counts, colorscale="Viridis", showscale=True,
-                    colorbar=dict(title="Transcript Count"),
-                    line=dict(width=0.5, color="rgba(255, 255, 255, 0.2)")
-                ),
-                text=[f"Bin {i}<br>Total Transcripts: {val}" for i, val in enumerate(total_counts)],
-                hoverinfo="text+x+y"
-            )
-        )
-        fig_density.update_layout(
-            title=f"Binned expression density (Resolution={resolution})",
-            template="plotly_dark", width=900, height=700,
-            xaxis=dict(title="X position (um)", scaleanchor="y", scaleratio=1),
-            yaxis=dict(title="Y position (um)"),
-            plot_bgcolor="#0E1117", paper_bgcolor="#0E1117"
-        )
-        st.plotly_chart(fig_density, use_container_width=True)
-        
-    with tab_graph:
-        st.subheader("Spatial Adjacency Graph Overlay")
-        fig_graph = go.Figure()
-        
-        if n_edges > 0:
-            coo_adj = adj_matrix.tocoo()
-            mask = coo_adj.row < coo_adj.col
-            edges_from = coo_adj.row[mask]
-            edges_to = coo_adj.col[mask]
-            
-            edge_x = []
-            edge_y = []
-            for u, v in zip(edges_from, edges_to):
-                edge_x.extend([bin_coords[u, 0], bin_coords[v, 0], None])
-                edge_y.extend([bin_coords[u, 1], bin_coords[v, 1], None])
-                
-            fig_graph.add_trace(
-                go.Scattergl(
-                    x=edge_x, y=edge_y, mode="lines",
-                    line=dict(color="rgba(158, 160, 163, 0.35)", width=1),
-                    hoverinfo="none", name="Spatial Neighbors"
-                )
-            )
-            
-        fig_graph.add_trace(
-            go.Scattergl(
-                x=bin_coords[:, 0] if n_bins > 0 else [],
-                y=bin_coords[:, 1] if n_bins > 0 else [],
-                mode="markers",
-                marker=dict(
-                    size=8, color=total_counts, colorscale="Inferno", showscale=True,
-                    colorbar=dict(title="Molecules/Bin"),
-                    line=dict(width=0.3, color="rgba(255, 255, 255, 0.3)")
-                ),
-                text=[f"Bin Node {i}<br>Degree: {adj_matrix[i].sum()}" for i in range(n_bins)],
-                hoverinfo="text+x+y", name="Bin Nodes"
-            )
-        )
-        fig_graph.update_layout(
-            title=f"Spatial Adjacency Graph (Max Distance={max_dist})",
-            template="plotly_dark", width=900, height=700,
-            xaxis=dict(title="X position (um)", scaleanchor="y", scaleratio=1),
-            yaxis=dict(title="Y position (um)"),
-            plot_bgcolor="#0E1117", paper_bgcolor="#0E1117"
-        )
-        st.plotly_chart(fig_graph, use_container_width=True)
-
-    with tab_spectrum:
-        st.subheader("Graph Laplacian Spectral Analysis")
-        st.markdown(
-            """
-            Eigenvalues of the Graph Laplacian ($L = D - A$) measure spatial graph connectivity, 
-            connected component clusters, and graph algebraic connectivity (Fiedler value).
-            """
-        )
-        if n_bins > 1:
-            k_evals = min(15, n_bins - 1)
-            evals = compute_laplacian_spectrum(laplacian_matrix, k=k_evals)
-            
-            fig_spec = go.Figure()
-            fig_spec.add_trace(go.Scatter(
-                x=list(range(1, len(evals) + 1)),
-                y=evals,
-                mode="lines+markers",
-                marker=dict(size=8, color="#00E5FF"),
-                line=dict(color="#00E5FF", width=2)
-            ))
-            fig_spec.update_layout(
-                title=f"Top {len(evals)} Smallest Graph Laplacian Eigenvalues",
-                xaxis=dict(title="Eigenvalue Index (k)"),
-                yaxis=dict(title="Eigenvalue Magnitude (λ)"),
-                template="plotly_dark", height=450
-            )
-            st.plotly_chart(fig_spec, use_container_width=True)
-            
-            if len(evals) > 1:
-                st.info(f"**Algebraic Connectivity (Fiedler Value λ₂)**: {evals[1]:.4f}")
-        else:
-            st.info("Insufficient bin nodes for spectral analysis.")
-            
-    with tab_svg:
-        st.subheader("Spatially Variable Gene (SVG) Identification")
-        st.markdown(
-            "Identifies genes with strong spatial clustering using **Moran's I** and **Geary's C** "
-            "spatial autocorrelation metrics computed over the spatial adjacency graph."
-        )
-        if n_bins > 1 and n_edges > 0:
-            gene_categories = list(df["gene"].cat.categories)
-            svg_table = compute_spatially_variable_genes(sparse_counts, gene_categories, adj_matrix)
-            
-            c_top, c_chart = st.columns([1, 1])
-            with c_top:
-                st.markdown("##### Ranked Spatial Autocorrelation Table")
-                st.dataframe(svg_table.style.format({
-                    "morans_i": "{:.4f}",
-                    "gearys_c": "{:.4f}",
-                    "z_score": "{:.2f}",
-                    "p_value": "{:.2e}",
-                    "fdr_p_value": "{:.2e}"
-                }), use_container_width=True)
-                
-            with c_chart:
-                st.markdown("##### Moran's I Ranking Bar Chart")
-                fig_svg = px.bar(
-                    svg_table.head(10), x="morans_i", y="gene", orientation="h",
-                    color="morans_i", color_continuous_scale="Viridis",
-                    title="Top 10 Spatially Autocorrelated Genes",
-                    template="plotly_dark",
-                    labels={"morans_i": "Moran's I Statistic", "gene": "Gene"}
-                )
-                fig_svg.update_layout(yaxis=dict(autorange="reversed"), height=400)
-                st.plotly_chart(fig_svg, use_container_width=True)
-        else:
-            st.info("Insufficient spatial bins or edges to compute spatial autocorrelation.")
-
-    with tab_exporter:
-        st.subheader("Ecosystem Exports & AnnData (.h5ad) Integration")
-        
-        if HAS_ANNDATA:
-            st.markdown("##### 1. AnnData (.h5ad) Scanpy/Squidpy Export")
-            st.markdown(
-                "Export binned count matrix (`adata.X`), spatial coordinates (`adata.obsm['spatial']`), "
-                "and spatial graph adjacency (`adata.obsp['spatial_connectivities']`)."
-            )
-            adata_obj = to_anndata(
-                sparse_counts, 
-                bin_coords, 
-                genes=np.array(df["gene"].cat.categories),
-                adjacency_matrix=adj_matrix,
-                laplacian_matrix=laplacian_matrix
-            )
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix=".h5ad", delete=False) as tmp_file:
-                tmp_h5ad_path = tmp_file.name
-                
-            try:
-                adata_obj.write_h5ad(tmp_h5ad_path)
-                with open(tmp_h5ad_path, "rb") as f:
-                    h5ad_bytes = f.read()
-            finally:
-                if os.path.exists(tmp_h5ad_path):
-                    try:
-                        os.remove(tmp_h5ad_path)
-                    except OSError:
-                        pass
-                        
-            st.download_button(
-                label="Download Scanpy/Squidpy AnnData (.h5ad)",
-                data=h5ad_bytes,
-                file_name="spatial_transcriptomics_binned.h5ad",
-                mime="application/x-hdf"
-            )
-
-            st.markdown("---")
-
-        # 2. Binned counts matrix csv
-        st.markdown("##### 2. Binned Expression Matrix (CSV)")
-        dense_counts_df = pd.DataFrame(
-            sparse_counts.toarray(),
-            columns=list(df["gene"].cat.categories)
-        )
-        if n_bins > 0:
-            dense_counts_df.insert(0, "bin_x", bin_coords[:, 0])
-            dense_counts_df.insert(1, "bin_y", bin_coords[:, 1])
-        
-        csv_buffer = StringIO()
-        dense_counts_df.to_csv(csv_buffer, index=False)
-        st.download_button(
-            label="Download Binned Expression Matrix (CSV)",
-            data=csv_buffer.getvalue(),
-            file_name="expression_matrix.csv",
-            mime="text/csv"
-        )
-        
-        # 3. Graph Adjacency List
-        st.markdown("##### 3. Spatial Graph Adjacency List (CSV)")
-        if n_edges > 0:
-            coo_adj = adj_matrix.tocoo()
-            adj_df = pd.DataFrame({
-                "source_bin": coo_adj.row,
-                "target_bin": coo_adj.col
-            })
-            adj_df = adj_df[adj_df["source_bin"] < adj_df["target_bin"]]
-            
-            csv_adj_buffer = StringIO()
-            adj_df.to_csv(csv_adj_buffer, index=False)
-            st.download_button(
-                label="Download Adjacency Edge List (CSV)",
-                data=csv_adj_buffer.getvalue(),
-                file_name="adjacency_edge_list.csv",
-                mime="text/csv"
-            )
-            
-        # 4. Graph Laplacian Matrix (NPZ)
-        st.markdown("##### 4. Graph Laplacian Sparse Matrix (NPZ)")
-        npz_buffer = BytesIO()
-        scipy.sparse.save_npz(npz_buffer, laplacian_matrix)
-        st.download_button(
-            label="Download Graph Laplacian Matrix (NPZ)",
-            data=npz_buffer.getvalue(),
-            file_name="laplacian_matrix.npz",
-            mime="application/x-numpy"
-        )

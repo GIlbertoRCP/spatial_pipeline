@@ -1,8 +1,10 @@
 """
-spatial_pipeline: High-performance spatial transcriptomics data engine.
+spatial_pipeline: Spatial hotspot engine for geotagged photos and other labeled points.
 
-Provides high-speed binning algorithms, GPU/CPU spatial graph generation (RAPIDS cuGraph/cuML),
-Dask/Zarr out-of-core streaming, and AnnData/PyG interoperability.
+Provides YFCC100M photo ingestion, lon/lat projection, hex/square/tree binning,
+photographer-weighted hotspot analysis, GPU/CPU spatial graph generation (RAPIDS cuGraph/cuML),
+spatial autocorrelation (Moran's I / Geary's C), Dask/Zarr out-of-core streaming,
+and AnnData/PyG interoperability.
 """
 
 from __future__ import annotations
@@ -19,6 +21,15 @@ from .binning import (
     compute_square_bins,
     get_bin_centers,
 )
+from .geo import (
+    COLORADO_BBOX,
+    DEFAULT_CRS,
+    DENVER_METRO_BBOX,
+    in_bbox,
+    parse_bbox,
+    project_lonlat,
+    unproject_xy,
+)
 from .graphs import (
     build_knn_graph,
     build_spatial_graph,
@@ -26,9 +37,16 @@ from .graphs import (
     compute_gpu_knn_graph_cuml,
     compute_laplacian_spectrum,
     compute_morans_i,
-    compute_spatially_variable_genes,
+    compute_spatially_variable_labels,
     is_gpu_available,
     to_pyg_data,
+)
+from .hotspots import (
+    HotspotResult,
+    compute_hotspots,
+    hex_polygons_lonlat,
+    load_hotspots,
+    save_hotspots,
 )
 from .io import (
     arrow_table_to_numpy,
@@ -57,10 +75,21 @@ from .out_of_core import (
     profile_out_of_core_execution,
     stitch_out_of_core_results,
 )
+from .photos import (
+    decode_tags,
+    explode_tags,
+    load_photos,
+    read_yfcc_metadata,
+    save_photos,
+)
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
+    "COLORADO_BBOX",
+    "DEFAULT_CRS",
+    "DENVER_METRO_BBOX",
+    "HotspotResult",
     "arrow_table_to_numpy",
     "benchmark_binning_algorithms",
     "bin_hexagonal",
@@ -74,33 +103,46 @@ __all__ = [
     "build_spatial_graph",
     "compute_gearys_c",
     "compute_gpu_knn_graph_cuml",
+    "compute_hotspots",
     "compute_laplacian_spectrum",
     "compute_morans_i",
-    "compute_spatially_variable_genes",
+    "compute_spatially_variable_labels",
     "compute_square_bins",
     "dask_bin_transcripts",
     "dask_compute_spatial_metrics",
+    "decode_tags",
     "download_dataset",
     "enforce_memory_limit",
+    "explode_tags",
     "from_anndata",
     "generate_vectorized_mock_data",
     "get_bin_centers",
+    "hex_polygons_lonlat",
+    "in_bbox",
     "is_gpu_available",
     "load_coordinates",
+    "load_hotspots",
+    "load_photos",
     "load_tile_with_halo",
     "load_transcript_arrow",
     "load_transcript_data",
+    "parse_bbox",
     "partition_dataset_to_tiles",
     "process_tile_out_of_core",
     "process_tiles_parallel_out_of_core",
     "profile_memory",
     "profile_out_of_core_execution",
+    "project_lonlat",
     "read_anndata",
+    "read_yfcc_metadata",
     "read_zarr",
     "save_anndata",
+    "save_hotspots",
+    "save_photos",
     "stitch_out_of_core_results",
     "stream_zarr_anndata",
     "to_anndata",
     "to_pyg_data",
     "to_zarr",
+    "unproject_xy",
 ]

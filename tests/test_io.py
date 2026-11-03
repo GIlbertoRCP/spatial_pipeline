@@ -34,7 +34,7 @@ def test_generate_vectorized_mock_data():
         assert os.path.exists(tmp_path)
         df = pd.read_csv(tmp_path)
         assert len(df) == 500
-        assert set(df.columns) == {"x", "y", "gene"}
+        assert set(df.columns) == {"x", "y", "label"}
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
@@ -48,7 +48,7 @@ def test_load_transcript_data():
         generate_vectorized_mock_data(tmp_path, num_molecules=200)
         df = load_transcript_data(tmp_path)
         assert len(df) == 200
-        assert df["gene"].dtype.name == "category"
+        assert df["label"].dtype.name == "category"
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
@@ -65,7 +65,7 @@ def test_pyarrow_loading():
         arr_dict = arrow_table_to_numpy(table)
         assert len(arr_dict["x"]) == 100
         assert len(arr_dict["y"]) == 100
-        assert len(arr_dict["gene"]) == 100
+        assert len(arr_dict["label"]) == 100
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
@@ -75,13 +75,13 @@ def test_pyarrow_loading():
 def test_anndata_roundtrip():
     counts = csr_matrix(np.array([[1, 2], [3, 4]], dtype=np.float32))
     coords = np.array([[10.0, 10.0], [20.0, 20.0]])
-    genes = np.array(["GAPDH", "ACTB"])
+    labels = np.array(["GAPDH", "ACTB"])
     adj, lap = build_spatial_graph(coords, max_distance=15.0)
 
     adata = to_anndata(
         sparse_counts=counts,
         bin_coords=coords,
-        genes=genes,
+        labels=labels,
         adjacency_matrix=adj,
         laplacian_matrix=lap,
         compute_svg=True
@@ -98,7 +98,7 @@ def test_anndata_roundtrip():
     extracted = from_anndata(adata)
     assert extracted["counts"].shape == (2, 2)
     assert np.array_equal(extracted["bin_coords"], coords)
-    assert np.array_equal(extracted["genes"], genes)
+    assert np.array_equal(extracted["labels"], labels)
 
     with tempfile.NamedTemporaryFile(suffix=".h5ad", delete=False) as tmp:
         tmp_h5ad = tmp.name
@@ -118,9 +118,9 @@ def test_anndata_roundtrip():
 def test_zarr_roundtrip_and_streaming():
     counts = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]], dtype=np.float32)
     coords = np.array([[10.0, 10.0], [20.0, 20.0], [30.0, 30.0], [40.0, 40.0]], dtype=np.float32)
-    genes = np.array(["GAPDH", "ACTB"])
+    labels = np.array(["GAPDH", "ACTB"])
 
-    adata = to_anndata(sparse_counts=counts, bin_coords=coords, genes=genes)
+    adata = to_anndata(sparse_counts=counts, bin_coords=coords, labels=labels)
     tmp_zarr = tempfile.mkdtemp(suffix=".zarr")
 
     try:

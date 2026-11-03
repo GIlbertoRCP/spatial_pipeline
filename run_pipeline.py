@@ -68,13 +68,13 @@ def main():
             )
             
             print(f"[*] 3. Stitching out-of-core spatial graph and count matrices...")
-            global_expression, global_centers, global_genes, adj, laplacian = stitch_out_of_core_results(
+            global_expression, global_centers, global_labels, adj, laplacian = stitch_out_of_core_results(
                 tmp_out_dir, args.resolution
             )
             
         print(f"[+] Out-of-Core Processing complete!")
         print(f"    - Global Binned Nodes: {global_expression.shape[0]}")
-        print(f"    - Total Unique Genes:  {len(global_genes)}")
+        print(f"    - Total Unique Labels:  {len(global_labels)}")
         print(f"    - Spatial Adjacency Edges: {adj.nnz}")
         print(f"    - Graph Laplacian Shape: {laplacian.shape}")
         print("[===] Memory-Constrained Engine finished processing successfully! [===]")
@@ -85,7 +85,7 @@ def main():
         
         print(f"[*] Executing spatial grid binning (Resolution: {args.resolution})...")
         sparse_counts, bin_coords = compute_square_bins(df, args.resolution)
-        print(f"[+] Created {sparse_counts.shape[0]} unique active bins across {sparse_counts.shape[1]} genes.")
+        print(f"[+] Created {sparse_counts.shape[0]} unique active bins across {sparse_counts.shape[1]} labels.")
         
         print(f"[*] Generating spatial adjacency graph & Graph Laplacian (Max Dist: {args.max_dist}, n_jobs: {args.n_jobs})...")
         adj, laplacian = build_spatial_graph(bin_coords, args.max_dist, n_jobs=args.n_jobs)
