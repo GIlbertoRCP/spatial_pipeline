@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import time
 import tracemalloc
 from collections.abc import Generator
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import Any
 
 import numpy as np
@@ -22,10 +23,10 @@ import scipy.sparse
 from scipy.sparse import coo_matrix, csr_matrix
 from scipy.spatial import KDTree
 
-try:
+if sys.platform != "win32":
     import resource
-except ImportError:
-    resource = None  # type: ignore
+else:
+    resource = None
 
 try:
     import dask.array as da  # type: ignore
@@ -43,6 +44,8 @@ except ImportError:
     zarr = None  # type: ignore
     HAS_ZARR = False
 
+from .io import zarr_x_array
+
 
 def check_memory_limit(limit_mb: float | None = None) -> None:
     """
@@ -56,7 +59,7 @@ def check_memory_limit(limit_mb: float | None = None) -> None:
     """
     if limit_mb is None or limit_mb <= 0:
         return
-    current_bytes, peak_bytes = tracemalloc.get_traced_memory()
+    _, peak_bytes = tracemalloc.get_traced_memory()
     peak_mb = peak_bytes / (1024.0 * 1024.0)
     if peak_mb > limit_mb:
         raise MemoryError(
@@ -78,20 +81,18 @@ def enforce_memory_limit(limit_mb: float | None = None) -> Generator[None, None,
     if limit_mb is not None and limit_mb > 0:
         bytes_limit = int(limit_mb * 1024 * 1024)
         if resource is not None and hasattr(resource, "RLIMIT_AS"):
-            try:
+            # setrlimit raises ValueError/OSError when the limit is unsupported or not permitted;
+            # the tracemalloc check below still enforces the cap.
+            with suppress(ValueError, OSError):
                 soft, hard = resource.getrlimit(resource.RLIMIT_AS)
                 old_limit = (soft, hard)
                 resource.setrlimit(resource.RLIMIT_AS, (bytes_limit, hard))
-            except Exception:
-                pass
     try:
         yield
     finally:
         if old_limit is not None and resource is not None and hasattr(resource, "RLIMIT_AS"):
-            try:
+            with suppress(ValueError, OSError):
                 resource.setrlimit(resource.RLIMIT_AS, old_limit)
-            except Exception:
-                pass
         if limit_mb is not None:
             check_memory_limit(limit_mb)
 
@@ -385,7 +386,7 @@ def stitch_out_of_core_results(
             if global_labels is None:
                 global_labels = labels
 
-    if not all_bins:
+    if not all_bins or global_labels is None:
         raise ValueError("No intermediate results found to stitch.")
 
     global_bins = np.concatenate(all_bins, axis=0)
@@ -689,9 +690,7 @@ def dask_compute_spatial_metrics(
         raise ImportError("Zarr is required. Install with `pip install zarr`.")
 
     root = zarr.open_group(zarr_store_path, mode="r")
-    x_node = root.get("X")
-    if x_node is None:
-        x_node = root.get("raw/X") or root
+    x_node = zarr_x_array(root)
 
     darr = da.from_zarr(x_node, chunks=(chunk_size, x_node.shape[1]))
 

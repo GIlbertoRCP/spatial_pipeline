@@ -302,7 +302,7 @@ def to_anndata(
     adata.obsm["spatial"] = np.asarray(bin_coords, dtype=np.float32)
 
     if labels is not None:
-        adata.var_names = np.asarray(labels).astype(str)
+        adata.var_names = np.asarray(labels).astype(str).tolist()
 
     if adjacency_matrix is not None:
         adata.obsp["spatial_connectivities"] = adjacency_matrix
@@ -398,22 +398,7 @@ def to_zarr(
     if not HAS_ANNDATA or ad is None:
         raise ImportError("anndata is required for Zarr export.")
 
-    if hasattr(adata, "write_zarr"):
-        adata.write_zarr(store_path, chunks=chunks)
-    else:
-        # Fallback manual Zarr store
-        if not HAS_ZARR or zarr is None:
-            raise ImportError("zarr is required. Install with `pip install zarr`.")
-        root = zarr.open_group(store_path, mode="w")
-        if hasattr(adata.X, "toarray"):
-            dense_x = adata.X.toarray()
-        else:
-            dense_x = np.asarray(adata.X)
-        chunk_shape = chunks if chunks is not None else (min(10000, dense_x.shape[0]), dense_x.shape[1])
-        root.create_dataset("X", data=dense_x, chunks=chunk_shape)
-        if "spatial" in adata.obsm:
-            root.create_dataset("obsm/spatial", data=np.asarray(adata.obsm["spatial"]))
-        root.create_dataset("var_names", data=np.asarray(adata.var_names, dtype=str))
+    adata.write_zarr(store_path, chunks=chunks)
 
 
 def read_zarr(store_path: str) -> ad.AnnData:
@@ -429,19 +414,29 @@ def read_zarr(store_path: str) -> ad.AnnData:
     if not HAS_ANNDATA or ad is None:
         raise ImportError("anndata is required to read Zarr.")
 
-    if hasattr(ad, "read_zarr"):
-        return ad.read_zarr(store_path)
+    return ad.read_zarr(store_path)
 
-    if not HAS_ZARR or zarr is None:
-        raise ImportError("zarr is required.")
-    root = zarr.open_group(store_path, mode="r")
-    X = np.asarray(root["X"])
-    adata = ad.AnnData(X=X)
-    if "obsm/spatial" in root:
-        adata.obsm["spatial"] = np.asarray(root["obsm/spatial"])
-    if "var_names" in root:
-        adata.var_names = np.asarray(root["var_names"]).astype(str)
-    return adata
+
+def zarr_x_array(root: zarr.Group) -> zarr.Array:
+    """
+    Returns the dense `X` (or `raw/X`) array of an AnnData Zarr store.
+
+    Args:
+        root: Opened Zarr group of an AnnData store.
+
+    Returns:
+        zarr.Array: The dense observation matrix.
+
+    Raises:
+        ValueError: If `X` is missing or stored sparse (a group of data/indices/indptr arrays).
+    """
+    for path in ("X", "raw/X"):
+        node = root.get(path)
+        if isinstance(node, zarr.Array):
+            return node
+        if node is not None:
+            raise ValueError(f"'{path}' is stored as a sparse group; dense X is required for chunked streaming.")
+    raise ValueError("Zarr store has no 'X' or 'raw/X' array.")
 
 
 def stream_zarr_anndata(
@@ -463,16 +458,15 @@ def stream_zarr_anndata(
         raise ImportError("zarr package is required for streaming. Install with `pip install zarr`.")
 
     root = zarr.open_group(store_path, mode="r")
-    x_node = root.get("X")
-    if x_node is None:
-        # Check anndata zarr structure
-        x_node = root.get("raw/X") or root
+    x_node = zarr_x_array(root)
     total_obs = x_node.shape[0]
 
-    spatial_node = root.get("obsm/spatial") or root.get("obsm", {}).get("spatial")
+    spatial = root.get("obsm/spatial")
+    spatial_node = spatial if isinstance(spatial, zarr.Array) else None
     var_names = None
-    if "var" in root and "_index" in root["var"]:
-        var_names = np.asarray(root["var"]["_index"])
+    var_group = root.get("var")
+    if isinstance(var_group, zarr.Group) and "_index" in var_group:
+        var_names = np.asarray(var_group["_index"])
     elif "var_names" in root:
         var_names = np.asarray(root["var_names"])
 

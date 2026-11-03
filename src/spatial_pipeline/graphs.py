@@ -38,8 +38,8 @@ except ImportError:
     HAS_CUML = False
 
 try:
-    import cugraph  # type: ignore
     import cudf  # type: ignore
+    import cugraph  # type: ignore
     HAS_CUGRAPH = True
 except ImportError:
     cugraph = None  # type: ignore
@@ -60,7 +60,7 @@ def is_gpu_available() -> bool:
         if cp is not None:
             _ = cp.cuda.runtime.getDeviceCount()
             return True
-    except Exception:
+    except Exception:  # noqa: BLE001 - any CUDA runtime/driver failure means no usable GPU
         return False
     return False
 
@@ -114,7 +114,7 @@ def compute_gpu_knn_graph_cuml(
     d_coords = cp.asarray(bin_coords, dtype=cp.float32)
     nn_model = cuNearestNeighbors(n_neighbors=k, metric=metric, output_type="cupy")
     nn_model.fit(d_coords)
-    distances, indices = nn_model.kneighbors(d_coords)
+    _, indices = nn_model.kneighbors(d_coords)
 
     # Convert GPU indices to COO host arrays
     h_indices = cp.asnumpy(indices)
@@ -183,7 +183,7 @@ def build_knn_graph(
     if use_gpu:
         try:
             adj = compute_gpu_knn_graph_cuml(bin_coords, n_neighbors=n_neighbors, metric=metric)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - GPU errors vary by RAPIDS version; always fall back to CPU
             logger.warning(f"GPU k-NN graph construction failed: {e}. Falling back to CPU.")
             use_gpu = False
 
@@ -257,46 +257,46 @@ def build_spatial_graph(
         return empty_csr, empty_csr
 
     # GPU Dispatch
-    if backend in ("cugraph", "cuml", "cuda") or (backend == "auto" and is_gpu_available() and num_bins >= 5000):
-        if is_gpu_available() and HAS_CUML and cp is not None:
-            try:
-                d_coords = cp.asarray(bin_coords, dtype=cp.float32)
-                # cuML NearestNeighbors radius query
-                nn_model = cuNearestNeighbors(radius=max_distance, metric="euclidean", output_type="cupy")
-                nn_model.fit(d_coords)
-                # Query radius neighbors
-                distances, indices = nn_model.radius_neighbors(d_coords)
-                # Symmetrize and build adjacency
-                # Note: radius_neighbors in cuML returns RaggedArray or list of cupy arrays
-                all_rows = []
-                all_cols = []
-                for i in range(num_bins):
-                    nbrs = cp.asnumpy(indices[i])
-                    nbrs = nbrs[nbrs != i]
-                    if len(nbrs) > 0:
-                        all_rows.append(np.full(len(nbrs), i, dtype=np.int32))
-                        all_cols.append(nbrs.astype(np.int32))
-                if all_rows:
-                    row_indices = np.concatenate(all_rows)
-                    col_indices = np.concatenate(all_cols)
-                    rows = np.concatenate([row_indices, col_indices])
-                    cols = np.concatenate([col_indices, row_indices])
-                    data = np.ones_like(rows, dtype=np.float32)
-                    adjacency_matrix = csr_matrix((data, (rows, cols)), shape=(num_bins, num_bins), dtype=np.float32)
-                    adjacency_matrix.data = np.clip(adjacency_matrix.data, 0.0, 1.0)
-                else:
-                    adjacency_matrix = csr_matrix((num_bins, num_bins), dtype=np.float32)
+    wants_gpu = backend in ("cugraph", "cuml", "cuda") or (backend == "auto" and num_bins >= 5000)
+    if wants_gpu and is_gpu_available() and HAS_CUML and cp is not None:
+        try:
+            d_coords = cp.asarray(bin_coords, dtype=cp.float32)
+            # cuML NearestNeighbors radius query
+            nn_model = cuNearestNeighbors(radius=max_distance, metric="euclidean", output_type="cupy")
+            nn_model.fit(d_coords)
+            # Query radius neighbors
+            _, indices = nn_model.radius_neighbors(d_coords)
+            # Symmetrize and build adjacency
+            # Note: radius_neighbors in cuML returns RaggedArray or list of cupy arrays
+            all_rows = []
+            all_cols = []
+            for i in range(num_bins):
+                nbrs = cp.asnumpy(indices[i])
+                nbrs = nbrs[nbrs != i]
+                if len(nbrs) > 0:
+                    all_rows.append(np.full(len(nbrs), i, dtype=np.int32))
+                    all_cols.append(nbrs.astype(np.int32))
+            if all_rows:
+                row_indices = np.concatenate(all_rows)
+                col_indices = np.concatenate(all_cols)
+                rows = np.concatenate([row_indices, col_indices])
+                cols = np.concatenate([col_indices, row_indices])
+                data = np.ones_like(rows, dtype=np.float32)
+                adjacency_matrix = csr_matrix((data, (rows, cols)), shape=(num_bins, num_bins), dtype=np.float32)
+                adjacency_matrix.data = np.clip(adjacency_matrix.data, 0.0, 1.0)
+            else:
+                adjacency_matrix = csr_matrix((num_bins, num_bins), dtype=np.float32)
 
-                degrees = np.array(adjacency_matrix.sum(axis=1)).flatten()
-                degree_matrix = csr_matrix(
-                    (degrees, (np.arange(num_bins), np.arange(num_bins))),
-                    shape=(num_bins, num_bins),
-                    dtype=np.float32
-                )
-                laplacian_matrix = degree_matrix - adjacency_matrix
-                return adjacency_matrix, laplacian_matrix
-            except Exception as e:
-                logger.warning(f"GPU radius graph building encountered error: {e}. Falling back to CPU.")
+            degrees = np.array(adjacency_matrix.sum(axis=1)).flatten()
+            degree_matrix = csr_matrix(
+                (degrees, (np.arange(num_bins), np.arange(num_bins))),
+                shape=(num_bins, num_bins),
+                dtype=np.float32
+            )
+            laplacian_matrix = degree_matrix - adjacency_matrix
+            return adjacency_matrix, laplacian_matrix
+        except Exception as e:  # noqa: BLE001 - GPU errors vary by RAPIDS version; always fall back to CPU
+            logger.warning(f"GPU radius graph building encountered error: {e}. Falling back to CPU.")
 
     if n_jobs == -1:
         n_jobs = os.cpu_count() or 1
