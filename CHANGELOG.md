@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Documentation site rewritten for the photo hotspot project: home, installation, quickstart, data sources, methods, dashboard, engine pages and an API reference covering the new modules. The transcriptomics tutorial notebooks and the unmeasured GPU speedup table are removed; the version comes from the package.
 - Docs workflow: builds with warnings as errors, builds on pull requests without deploying, and adds `configure-pages`.
+- Dependencies split into extras. The core install (numpy, scipy, pandas, pyarrow, pyproj, typer, rich) covers fetching, ingestion and the statistics; `ui` adds Streamlit and pydeck for the map, `scale` adds Dask. `spatial-pipeline ui` explains how to install the extra when it is missing. Unused `polars`, `matplotlib`, `plotly`, `memory-profiler`, `scikit-learn` and `click` pins are dropped.
+- `dask_bin_transcripts` renamed to `dask_bin_points`; the out-of-core docs page moved to `out_of_core.md`.
+- CI installs the `ui` and `scale` extras and also lints and type-checks `app.py`.
+
+### Removed
+- Spatial-transcriptomics leftovers: `run_pipeline.py`, `PROFILING_REPORT.md` (synthetic numbers), the scanpy/squidpy and GNN examples, the synthetic benchmarks, and the tracked `sample_spatial_processed.h5ad`.
+- The transcript CLI commands `run`, `svg`, `export` and `benchmark`.
+- From `io`: AnnData / `.h5ad` and Zarr conversion and streaming, the transcript loaders, the PyArrow helpers, `download_dataset` and the mock-data generator; `dask_compute_spatial_metrics`. The `anndata`, `h5py` and `zarr` dependencies go with them. Engine tests now use a test-only synthetic point generator (`tests/synthetic.py`).
 
 ### Fixed
 - CI: ruff errors in `graphs.py` / `out_of_core.py`, mypy errors from zarr 3 typing and the pinned Python version; pandas floor raised to 2.0.

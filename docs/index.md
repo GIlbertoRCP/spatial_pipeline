@@ -19,7 +19,7 @@ pinewoods geranium in the western foothills.
 ## Quick example
 
 ```bash
-pip install -e .
+pip install -e .[ui]
 spatial-pipeline fetch-inat --bbox denver --observed-from 2025-06-01 --observed-to 2025-06-30 --output photos.parquet
 spatial-pipeline hotspots --input photos.parquet --output-dir hotspots
 spatial-pipeline ui
@@ -46,7 +46,7 @@ result.local_hotspots     # significant Gi* hot spots per (hex, subject)
 | Hotspots | Hex binning on an equal-area projection, photographer-weighted counts, Moran's *I* ranking, Getis-Ord *Gi\** hot spots, Benjamini-Hochberg FDR |
 | Timing | Month and hour-of-day profiles per subject, with lift against all photos |
 | Dashboard | Streamlit + deck.gl map: month and group filters, click-a-spot details, credited photos |
-| Engine | Generic labeled-point binning, CPU/GPU spatial graphs, out-of-core tiling and Dask / Zarr streaming |
+| Engine | Generic labeled-point binning, CPU/GPU spatial graphs, out-of-core tiling and Dask binning |
 
 ```{toctree}
 :maxdepth: 2
@@ -69,7 +69,7 @@ dashboard
 :maxdepth: 2
 :caption: Engine
 
-out_of_core_dask_zarr
+out_of_core
 gpu_acceleration
 ```
 

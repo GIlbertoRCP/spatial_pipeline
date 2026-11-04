@@ -1,8 +1,8 @@
 """
 Chunked Out-of-Core Processing and Memory-Constrained Spatial Pipelines.
 
-This module provides spatial tiling, boundary halo exchange, Dask distributed DataFrame binning,
-and Zarr streaming matrix computations for spatial transcriptomics datasets exceeding host RAM.
+This module provides spatial tiling with boundary halo exchange and Dask DataFrame binning for
+labeled-point datasets (`x, y, label`) larger than host RAM.
 """
 
 from __future__ import annotations
@@ -29,22 +29,11 @@ else:
     resource = None
 
 try:
-    import dask.array as da  # type: ignore
     import dask.dataframe as dd  # type: ignore
     HAS_DASK = True
 except ImportError:
-    da = None  # type: ignore
     dd = None  # type: ignore
     HAS_DASK = False
-
-try:
-    import zarr
-    HAS_ZARR = True
-except ImportError:
-    zarr = None  # type: ignore
-    HAS_ZARR = False
-
-from .io import zarr_x_array
 
 
 def check_memory_limit(limit_mb: float | None = None) -> None:
@@ -122,10 +111,10 @@ def profile_memory() -> Generator[dict[str, float], None, None]:
 
 def partition_dataset_to_tiles(file_path: str, tile_size: float, partition_dir: str) -> None:
     """
-    Partitions a large spatial transcriptomics CSV file into spatial tiles on disk.
+    Partitions a large labeled-point CSV file (`x, y, label`) into spatial tiles on disk.
 
     Args:
-        file_path: Path to the raw transcript coordinates CSV.
+        file_path: Path to the point coordinates CSV.
         tile_size: The physical dimensions (width/height) of each spatial tile.
         partition_dir: Directory where tile partition CSV files will be stored.
     """
@@ -196,7 +185,7 @@ def load_tile_with_halo(
         partition_dir: Directory containing tile partition CSV files.
 
     Returns:
-        pd.DataFrame: DataFrame of transcripts inside core + halo boundary with source tile columns.
+        pd.DataFrame: DataFrame of points inside core + halo boundary with source tile columns.
     """
     dfs = []
     # Search the 3x3 grid of tiles centered at (tile_x, tile_y)
@@ -222,7 +211,7 @@ def load_tile_with_halo(
     y_min = tile_y * tile_size - halo_width
     y_max = (tile_y + 1) * tile_size + halo_width
 
-    # Filter molecules to bounds
+    # Filter points to bounds
     in_bounds = (
         (df_combined["x"] >= x_min) & (df_combined["x"] <= x_max) &
         (df_combined["y"] >= y_min) & (df_combined["y"] <= y_max)
@@ -269,7 +258,7 @@ def process_tile_out_of_core(
     x = df["x"].to_numpy()
     y = df["y"].to_numpy()
 
-    # 2. Bin molecules relative to global offset
+    # 2. Bin points relative to global offset
     bin_x = np.floor((x - x_min) / resolution).astype(np.int32)
     bin_y = np.floor((y - y_min) / resolution).astype(np.int32)
     bin_coords = np.column_stack((bin_x, bin_y))
@@ -312,10 +301,10 @@ def process_tile_out_of_core(
         return
 
     owned_bins = unique_bins[is_owned]
-    owned_transcripts_mask = is_owned[inverse_indices]
-    df_owned = df[owned_transcripts_mask]
+    owned_points_mask = is_owned[inverse_indices]
+    df_owned = df[owned_points_mask]
 
-    _, inverse_owned = np.unique(bin_coords[owned_transcripts_mask], axis=0, return_inverse=True)
+    _, inverse_owned = np.unique(bin_coords[owned_points_mask], axis=0, return_inverse=True)
 
     label_series = pd.Categorical(df_owned["label"], categories=unique_labels)
     label_codes = label_series.codes
@@ -590,7 +579,7 @@ def profile_out_of_core_execution(
     return report
 
 
-def dask_bin_transcripts(
+def dask_bin_points(
     file_or_df: str | pd.DataFrame,
     resolution: float,
     min_counts: int = 1,
@@ -604,14 +593,14 @@ def dask_bin_transcripts(
     Args:
         file_or_df: Path to CSV coordinate file or pandas DataFrame.
         resolution: Spatial bin grid width.
-        min_counts: Minimum transcript count threshold per bin.
+        min_counts: Minimum point count per bin.
         blocksize: Partition chunk size for Dask CSV reading (e.g. '64MB').
 
     Returns:
         tuple[csr_matrix, np.ndarray, np.ndarray]: (sparse_counts, bin_centers, unique_labels).
     """
     if not HAS_DASK or dd is None:
-        raise ImportError("Dask is required. Install with `pip install 'dask[dataframe]'`.")
+        raise ImportError("Dask is required. Install with `pip install 'spatial_pipeline[scale]'`.")
 
     if isinstance(file_or_df, str):
         ddf = dd.read_csv(file_or_df, usecols=["x", "y", "label"], blocksize=blocksize)
@@ -663,45 +652,3 @@ def dask_bin_transcripts(
         bin_centers = bin_centers[keep_mask]
 
     return sparse_matrix, bin_centers, unique_labels
-
-
-def dask_compute_spatial_metrics(
-    zarr_store_path: str,
-    chunk_size: int = 10000
-) -> dict[str, np.ndarray]:
-    """
-    Computes out-of-core label counts statistics (mean, variance, sparsity)
-    across a chunked Zarr hierarchy using Dask Arrays.
-
-    Args:
-        zarr_store_path: Path to .zarr dataset store on disk.
-        chunk_size: Observation chunk size for Dask chunking.
-
-    Returns:
-        dict[str, np.ndarray]: Dictionary containing:
-            - 'mean': 1D array of mean expression per label.
-            - 'var': 1D array of variance per label.
-            - 'sparsity': 1D array of fractional non-zero bins per label.
-    """
-    if not HAS_DASK or da is None:
-        raise ImportError("Dask is required. Install with `pip install dask`.")
-
-    if not HAS_ZARR or zarr is None:
-        raise ImportError("Zarr is required. Install with `pip install zarr`.")
-
-    root = zarr.open_group(zarr_store_path, mode="r")
-    x_node = zarr_x_array(root)
-
-    darr = da.from_zarr(x_node, chunks=(chunk_size, x_node.shape[1]))
-
-    mean_da = darr.mean(axis=0)
-    var_da = darr.var(axis=0)
-    sparsity_da = (darr > 0).mean(axis=0)
-
-    mean_res, var_res, sparsity_res = da.compute(mean_da, var_da, sparsity_da)
-
-    return {
-        "mean": np.asarray(mean_res),
-        "var": np.asarray(var_res),
-        "sparsity": np.asarray(sparsity_res)
-    }

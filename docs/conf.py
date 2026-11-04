@@ -41,7 +41,7 @@ napoleon_include_init_with_doc = True
 html_theme = "sphinx_book_theme"
 html_title = "Photo Hotspots"
 html_theme_options = {
-    "repository_url": "https://github.com/GIlbertoRCP/spatial_pipeline",
+    "repository_url": "https://github.com/gilbertorcp/spatial_pipeline",
     "use_repository_button": True,
     "use_issues_button": True,
     "use_edit_page_button": True,

@@ -1,8 +1,8 @@
 """
 Spatial binning algorithms: Square (Spatial Hashing), Hexagonal (Axial), KD-Tree, Quadtree, and Voronoi.
 
-This module provides high-speed 2D continuous molecule discretization and sparse count
-matrix aggregation for spatial transcriptomics datasets.
+This module provides high-speed 2D point discretization and sparse count
+matrix aggregation for labeled-point datasets.
 """
 
 from __future__ import annotations
@@ -337,11 +337,11 @@ def build_sparse_matrix(
     matrix_format: Literal["csr", "csc"] = "csr"
 ) -> tuple[csr_matrix | csc_matrix, np.ndarray, np.ndarray]:
     """
-    Aggregates molecule counts within active bins and exports to a SciPy sparse matrix.
+    Aggregates point counts within active bins and exports to a SciPy sparse matrix.
 
     Args:
-        bin_coords: 2D array of shape (N, 2) containing integer bin coordinates for each molecule.
-        labels: 1D array of label names (strings or categories) for each molecule.
+        bin_coords: 2D array of shape (N, 2) containing integer bin coordinates for each point.
+        labels: 1D array of label names (strings or categories) for each point.
         matrix_format: Format of sparse matrix: 'csr' or 'csc'.
 
     Returns:
@@ -376,7 +376,7 @@ def bin_voronoi(
     num_bins: int = 50
 ) -> tuple[np.ndarray, tuple[float, float], np.ndarray]:
     """
-    Spatially bins 2D points into adaptive Voronoi regions adapting dynamically to local molecule density.
+    Spatially bins 2D points into adaptive Voronoi regions adapting dynamically to local point density.
 
     Args:
         x: 1D array of x coordinates.
@@ -420,7 +420,7 @@ def compute_square_bins(
     Args:
         df: DataFrame containing 'x', 'y', and 'label' columns.
         resolution: Physical width of each square bin.
-        min_counts: Minimum transcript count threshold per bin to eliminate background noise.
+        min_counts: Minimum point count per bin; sparser bins are dropped.
 
     Returns:
         tuple[csr_matrix, np.ndarray]:

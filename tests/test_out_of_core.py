@@ -5,12 +5,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from spatial_pipeline.io import generate_vectorized_mock_data, to_anndata, to_zarr
 from spatial_pipeline.out_of_core import (
     HAS_DASK,
-    HAS_ZARR,
-    dask_bin_transcripts,
-    dask_compute_spatial_metrics,
+    dask_bin_points,
     load_tile_with_halo,
     partition_dataset_to_tiles,
     process_tile_out_of_core,
@@ -18,6 +15,8 @@ from spatial_pipeline.out_of_core import (
     profile_out_of_core_execution,
     stitch_out_of_core_results,
 )
+
+from tests.synthetic import write_synthetic_points
 
 
 def test_profile_memory_context_manager():
@@ -34,12 +33,12 @@ def test_profile_memory_context_manager():
 def test_out_of_core_partitioning_and_stitching():
     tmp_dir = tempfile.mkdtemp()
     try:
-        mock_csv = os.path.join(tmp_dir, "transcripts.csv")
+        mock_csv = os.path.join(tmp_dir, "points.csv")
         partition_dir = os.path.join(tmp_dir, "tiles")
 
-        generate_vectorized_mock_data(mock_csv, num_molecules=1000)
+        write_synthetic_points(mock_csv, num_points=1000)
 
-        # Partition into 100 um tiles
+        # Partition into 100-unit tiles
         partition_dataset_to_tiles(mock_csv, tile_size=100.0, partition_dir=partition_dir)
 
         assert os.path.exists(partition_dir)
@@ -75,8 +74,8 @@ def test_out_of_core_partitioning_and_stitching():
 def test_profile_out_of_core_execution():
     tmp_dir = tempfile.mkdtemp()
     try:
-        mock_csv = os.path.join(tmp_dir, "bench_transcripts.csv")
-        generate_vectorized_mock_data(mock_csv, num_molecules=800)
+        mock_csv = os.path.join(tmp_dir, "bench_points.csv")
+        write_synthetic_points(mock_csv, num_points=800)
 
         report = profile_out_of_core_execution(
             file_path=mock_csv,
@@ -95,13 +94,13 @@ def test_profile_out_of_core_execution():
 
 
 @pytest.mark.skipif(not HAS_DASK, reason="Dask not installed")
-def test_dask_bin_transcripts():
+def test_dask_bin_points():
     tmp_dir = tempfile.mkdtemp()
     try:
-        mock_csv = os.path.join(tmp_dir, "dask_transcripts.csv")
-        generate_vectorized_mock_data(mock_csv, num_molecules=1200)
+        mock_csv = os.path.join(tmp_dir, "dask_points.csv")
+        write_synthetic_points(mock_csv, num_points=1200)
 
-        sparse_counts, bin_centers, unique_labels = dask_bin_transcripts(
+        sparse_counts, bin_centers, unique_labels = dask_bin_points(
             mock_csv,
             resolution=25.0,
             min_counts=1
@@ -114,32 +113,3 @@ def test_dask_bin_transcripts():
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-
-@pytest.mark.skipif(not (HAS_DASK and HAS_ZARR), reason="Dask or Zarr not installed")
-def test_dask_compute_spatial_metrics():
-    tmp_dir = tempfile.mkdtemp()
-    try:
-        zarr_path = os.path.join(tmp_dir, "dataset.zarr")
-        data = np.array([
-            [1.0, 5.0, 0.0],
-            [2.0, 5.0, 1.0],
-            [3.0, 5.0, 0.0],
-            [4.0, 5.0, 2.0]
-        ], dtype=np.float32)
-        coords = np.array([[0, 0], [1, 1], [2, 2], [3, 3]], dtype=np.float32)
-        labels = np.array(["G1", "G2", "G3"])
-
-        adata = to_anndata(sparse_counts=data, bin_coords=coords, labels=labels)
-        to_zarr(adata, zarr_path)
-
-        metrics = dask_compute_spatial_metrics(zarr_path, chunk_size=2)
-        assert "mean" in metrics
-        assert "var" in metrics
-        assert "sparsity" in metrics
-
-        # Mean of G1 = (1+2+3+4)/4 = 2.5
-        assert np.isclose(metrics["mean"][0], 2.5)
-        # Var of G2 = variance of constant 5.0 = 0.0
-        assert np.isclose(metrics["var"][1], 0.0)
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)

@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 import pytest
 from scipy.sparse import csr_matrix
-from typer.testing import CliRunner
 
 from src.spatial_pipeline.binning import (
     bin_square, 
@@ -28,19 +27,7 @@ from src.spatial_pipeline.out_of_core import (
     stitch_out_of_core_results,
     profile_out_of_core_execution
 )
-from src.spatial_pipeline.io import (
-    load_transcript_arrow,
-    arrow_table_to_numpy,
-    load_transcript_data,
-    generate_vectorized_mock_data,
-    to_anndata,
-    from_anndata,
-    save_anndata,
-    read_anndata,
-    HAS_ANNDATA
-)
-
-from src.spatial_pipeline.cli import app as cli_app
+from tests.synthetic import write_synthetic_points
 
 
 def test_bin_square():
@@ -116,17 +103,17 @@ def test_build_sparse_matrix():
         [0, 0],  # bin 0
         [1, 1],  # bin 2
     ])
-    labels = np.array(["ACTB", "ACTB", "CD3D", "GAPDH", "CD3D"])
+    labels = np.array(["columbine", "columbine", "CD3D", "elk", "CD3D"])
     
     matrix, unique_bins, unique_labels = build_sparse_matrix(bin_coords, labels, "csr")
     
     assert len(unique_bins) == 3
-    assert set(unique_labels) == {"ACTB", "CD3D", "GAPDH"}
+    assert set(unique_labels) == {"columbine", "CD3D", "elk"}
     
     # Find column indices
-    actb_col = np.where(unique_labels == "ACTB")[0][0]
+    actb_col = np.where(unique_labels == "columbine")[0][0]
     cd3d_col = np.where(unique_labels == "CD3D")[0][0]
-    gapdh_col = np.where(unique_labels == "GAPDH")[0][0]
+    gapdh_col = np.where(unique_labels == "elk")[0][0]
     
     # Find row indices of the unique bins
     bin_0_0 = np.where((unique_bins == [0, 0]).all(axis=1))[0][0]
@@ -134,7 +121,7 @@ def test_build_sparse_matrix():
     bin_1_1 = np.where((unique_bins == [1, 1]).all(axis=1))[0][0]
     
     # Assert counts
-    # bin [0,0] has 2 ACTB, 1 GAPDH
+    # bin [0,0] has 2 columbine, 1 elk
     assert matrix[bin_0_0, actb_col] == 2
     assert matrix[bin_0_0, gapdh_col] == 1
     assert matrix[bin_0_0, cd3d_col] == 0
@@ -198,27 +185,27 @@ def test_build_adjacency_graph_hex():
         assert lap[0, i] == -1
 
 def test_square_binning_aggregation():
-    # Create mock data: 3 molecules sitting in the exact same spatial bin area
+    # Create mock data: 3 points sitting in the exact same spatial bin area
     mock_data = pd.DataFrame({
         'x': [10.2, 10.5, 10.8],
         'y': [20.1, 20.4, 20.3],
-        'label': pd.Series(['GeneA', 'GeneB', 'GeneA'], dtype='category')
+        'label': pd.Series(['tagA', 'tagB', 'tagA'], dtype='category')
     })
     
-    # Run binning with a resolution wide enough to hold all 3 molecules
+    # Run binning with a resolution wide enough to hold all 3 points
     sparse_counts, bin_coords = compute_square_bins(mock_data, resolution=5.0)
     
     # Assertions to verify our array tracking dimensions match expectations
     assert sparse_counts.shape[0] == 1  # All coordinates must collapse to exactly 1 unique bin
-    assert sparse_counts[0, 0] == 2    # Count for GeneA should equal 2
-    assert sparse_counts[0, 1] == 1    # Count for GeneB should equal 1
+    assert sparse_counts[0, 0] == 2    # Count for tagA should equal 2
+    assert sparse_counts[0, 1] == 1    # Count for tagB should equal 1
 
 def test_out_of_core_equivalence():
     # 1. Generate test dataset df
     mock_data = pd.DataFrame({
         'x': [12.5, 13.1, 55.0, 14.2, 85.0, 88.0, 102.0],
         'y': [45.2, 44.8, 82.1, 46.0, 81.0, 83.0, 105.0],
-        'label': pd.Series(['GAPDH', 'GAPDH', 'MALAT1', 'ACTB', 'GAPDH', 'MALAT1', 'ACTB'], dtype='category')
+        'label': pd.Series(['elk', 'elk', 'mallard', 'columbine', 'elk', 'mallard', 'columbine'], dtype='category')
     })
     
     # Save mock data to temporary file
@@ -363,34 +350,10 @@ def test_parallel_graph_construction():
     np.testing.assert_allclose(adj_multi.toarray(), adj_single.toarray())
     np.testing.assert_allclose(lap_multi.toarray(), lap_single.toarray())
 
-def test_pyarrow_zero_copy_and_io():
-    """Verify PyArrow zero-copy data transfer and ingestion."""
-    file_path = "test_arrow_mock.csv"
-    generate_vectorized_mock_data(file_path, num_molecules=1000)
-    
-    # PyArrow Table loading
-    table = load_transcript_arrow(file_path)
-    assert table.num_rows == 1000
-    assert table.column_names == ["x", "y", "label"]
-    
-    # Zero-copy dictionary conversion
-    arr_dict = arrow_table_to_numpy(table)
-    assert len(arr_dict["x"]) == 1000
-    assert len(arr_dict["y"]) == 1000
-    assert len(arr_dict["label"]) == 1000
-    
-    # Arrow-enabled DataFrame load
-    df_arrow = load_transcript_data(file_path, use_arrow=True)
-    assert len(df_arrow) == 1000
-    assert "x" in df_arrow.columns and "y" in df_arrow.columns
-    
-    if os.path.exists(file_path):
-        os.remove(file_path)
-
 def test_out_of_core_memory_profiling():
     """Verify exact peak RAM memory profiling for out-of-core operations."""
     file_path = "test_ooc_profile.csv"
-    generate_vectorized_mock_data(file_path, num_molecules=2000)
+    write_synthetic_points(file_path, num_points=2000)
     
     report = profile_out_of_core_execution(
         file_path, 
@@ -411,67 +374,6 @@ def test_out_of_core_memory_profiling():
     if os.path.exists(file_path):
         os.remove(file_path)
 
-def test_cli_interface():
-    """Test CLI commands run and benchmark via Typer CliRunner."""
-    runner = CliRunner()
-    
-    # Run command test
-    res_run = runner.invoke(cli_app, ["run", "--generate-mock", "--resolution", "20.0", "--n-jobs", "2"])
-    assert res_run.exit_code == 0
-    assert "Execution Summary" in res_run.stdout
-    
-    # Benchmark command test
-    res_bench = runner.invoke(cli_app, ["benchmark", "--num-molecules", "500", "--resolution", "20.0"])
-    assert res_bench.exit_code == 0
-    assert "Binning Algorithm Tradeoffs" in res_bench.stdout
-
-def test_anndata_ecosystem_interop():
-    """Verify AnnData (.h5ad) export and import functions."""
-    if not HAS_ANNDATA:
-        pytest.skip("anndata package is not installed.")
-        
-    np.random.seed(42)
-    mock_data = pd.DataFrame({
-        'x': [10.0, 15.0, 20.0, 25.0],
-        'y': [10.0, 15.0, 20.0, 25.0],
-        'label': pd.Series(['GeneA', 'GeneB', 'GeneA', 'GeneB'], dtype='category')
-    })
-    sparse_counts, bin_coords = compute_square_bins(mock_data, resolution=10.0)
-    adj_matrix, laplacian_matrix = build_spatial_graph(bin_coords, max_distance=15.0)
-    labels = np.array(['GeneA', 'GeneB'])
-    
-    # 1. Create AnnData
-    adata = to_anndata(
-        sparse_counts, 
-        bin_coords, 
-        labels=labels, 
-        adjacency_matrix=adj_matrix, 
-        laplacian_matrix=laplacian_matrix
-    )
-    
-    assert adata.n_obs == len(bin_coords)
-    assert adata.n_vars == len(labels)
-    assert 'spatial' in adata.obsm
-    assert 'spatial_connectivities' in adata.obsp
-    assert 'spatial_laplacian' in adata.obsp
-    
-    # 2. Reconstruct from AnnData
-    extracted = from_anndata(adata)
-    np.testing.assert_allclose(extracted['bin_coords'], bin_coords)
-    np.testing.assert_array_equal(extracted['labels'], labels)
-    
-    # 3. Save and read .h5ad file
-    h5ad_file = "test_spatial_anndata.h5ad"
-    save_anndata(adata, h5ad_file)
-    assert os.path.exists(h5ad_file)
-    
-    read_adata = read_anndata(h5ad_file)
-    assert read_adata.n_obs == adata.n_obs
-    assert 'spatial_connectivities' in read_adata.obsp
-    
-    if os.path.exists(h5ad_file):
-        os.remove(h5ad_file)
-
 def test_adaptive_voronoi_binning():
     """Verify adaptive Voronoi spatial binning."""
     np.random.seed(42)
@@ -484,11 +386,11 @@ def test_adaptive_voronoi_binning():
     assert len(set(bin_indices)) <= 10
 
 def test_min_counts_thresholding():
-    """Verify transcript count thresholding for noise bin elimination."""
+    """Verify that min_counts drops sparse bins."""
     mock_data = pd.DataFrame({
         'x': [10.0, 10.0, 10.0, 90.0],
         'y': [10.0, 10.0, 10.0, 90.0],
-        'label': pd.Series(['GeneA', 'GeneA', 'GeneB', 'GeneA'], dtype='category')
+        'label': pd.Series(['tagA', 'tagA', 'tagB', 'tagA'], dtype='category')
     })
     
     # min_counts = 1 -> keeps both bins
@@ -504,7 +406,7 @@ def test_pyg_data_export():
     mock_data = pd.DataFrame({
         'x': [10.0, 20.0, 30.0],
         'y': [10.0, 20.0, 30.0],
-        'label': pd.Series(['GeneA', 'GeneB', 'GeneA'], dtype='category')
+        'label': pd.Series(['tagA', 'tagB', 'tagA'], dtype='category')
     })
     sparse_counts, bin_coords = compute_square_bins(mock_data, resolution=15.0)
     adj_matrix, _ = build_spatial_graph(bin_coords, max_distance=20.0)

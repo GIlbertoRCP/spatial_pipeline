@@ -67,7 +67,7 @@ Generated from the docstrings. Everything listed is importable from the top-leve
    :show-inheritance:
 ```
 
-## Data I/O, AnnData and Zarr
+## Point loader
 
 ```{eval-rst}
 .. automodule:: spatial_pipeline.io

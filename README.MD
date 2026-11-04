@@ -1,7 +1,7 @@
 # Spatial Pipeline: Photo Hotspot Engine
 
 [![CI/CD Pipeline](https://github.com/gilbertorcp/spatial_pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/gilbertorcp/spatial_pipeline/actions/workflows/ci.yml)
-[![Docs](https://github.com/GIlbertoRCP/spatial_pipeline/actions/workflows/docs.yml/badge.svg)](https://gilbertorcp.github.io/spatial_pipeline/)
+[![Docs](https://github.com/gilbertorcp/spatial_pipeline/actions/workflows/docs.yml/badge.svg)](https://gilbertorcp.github.io/spatial_pipeline/)
 [![Python Version](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](https://pypi.org/project/spatial-pipeline/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -18,9 +18,9 @@ pinewoods geranium in the western foothills.
 
 📖 **Documentation:** <https://gilbertorcp.github.io/spatial_pipeline/>
 
-> **Status:** milestone 1 of [PLAN.md](PLAN.md): a hotspot map built from photo metadata.
-> Image embeddings, seasonal and golden-hour timing, and the live "shoot tonight" layer come in
-> later milestones.
+> **Status:** milestone 1 of [PLAN.md](PLAN.md) is done: a hotspot map built from photo metadata,
+> with Gi* hot spots and month / hour-of-day timing per subject. Golden-hour alignment, image
+> embeddings and the live "shoot tonight" layer come in later milestones.
 
 ---
 
@@ -75,8 +75,11 @@ Design choices that matter for real photo data:
 ```bash
 git clone https://github.com/gilbertorcp/spatial_pipeline.git
 cd spatial_pipeline
-pip install -e .[test]
+pip install -e .[ui]          # add ,test to run the test suite
 ```
+
+The core install covers fetching, ingestion and the statistics. The `ui` extra adds the map
+(Streamlit, pydeck), and `scale` adds Dask for out-of-core binning of very large point files.
 
 ### Get the data
 
@@ -157,8 +160,8 @@ The spatial core is not photo-specific. It works on any labeled 2D points:
 | :--- | :--- |
 | `binning` | Square (spatial hashing), hexagonal (axial), KD-tree, quadtree and Voronoi binning; sparse bin × label matrices |
 | `graphs` | Radius / k-NN spatial graphs (CPU multiprocessing or RAPIDS cuML on GPU), graph Laplacians, Moran's I, Geary's C, Getis-Ord Gi*, Benjamini-Hochberg FDR |
-| `out_of_core` | Tiled processing with halo exchange for datasets larger than RAM, Dask binning |
-| `io` | Parquet / CSV / PyArrow loaders, AnnData and Zarr export |
+| `out_of_core` | Tiled processing with halo exchange for datasets larger than RAM, Dask binning (`scale` extra) |
+| `io` | Loader for generic `x, y, label` point files (CSV / Parquet) |
 | `geo` | Bounding boxes, lon/lat ↔ projected coordinates |
 | `photos` | YFCC100M readers, tag decoding and filtering |
 | `inat` | Throttled, resumable iNaturalist fetcher (id-based paging, privacy and accuracy filters) |
@@ -166,14 +169,12 @@ The spatial core is not photo-specific. It works on any labeled 2D points:
 | `hotspots` | Photographer-weighted hex hotspots and tag ranking |
 | `timing` | Month and hour-of-day profiles per tag, with lift against all photos |
 
-The generic `run`, `svg`, `export` and `benchmark` CLI commands still operate on any
-`x, y, label` CSV.
-
 ---
 
 ## Testing
 
 ```bash
+pip install -e .[test,ui,scale]
 pytest
 ```
 

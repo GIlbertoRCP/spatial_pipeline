@@ -2,9 +2,8 @@
 spatial_pipeline: Spatial hotspot engine for geotagged photos and other labeled points.
 
 Provides iNaturalist and YFCC100M photo ingestion, lon/lat projection, hex/square/tree binning,
-photographer-weighted hotspot analysis, GPU/CPU spatial graph generation (RAPIDS cuGraph/cuML),
-spatial autocorrelation (Moran's I / Geary's C), Dask/Zarr out-of-core streaming,
-and AnnData/PyG interoperability.
+photographer-weighted hotspot analysis with global (Moran's I / Geary's C) and local (Getis-Ord Gi*)
+spatial statistics, CPU/GPU spatial graphs, out-of-core tiling, and PyG export.
 """
 
 from __future__ import annotations
@@ -60,24 +59,9 @@ from .inat import (
     INatFetcher,
     observations_to_photos,
 )
-from .io import (
-    arrow_table_to_numpy,
-    download_dataset,
-    from_anndata,
-    generate_vectorized_mock_data,
-    load_coordinates,
-    load_transcript_arrow,
-    load_transcript_data,
-    read_anndata,
-    read_zarr,
-    save_anndata,
-    stream_zarr_anndata,
-    to_anndata,
-    to_zarr,
-)
+from .io import load_coordinates
 from .out_of_core import (
-    dask_bin_transcripts,
-    dask_compute_spatial_metrics,
+    dask_bin_points,
     enforce_memory_limit,
     load_tile_with_halo,
     partition_dataset_to_tiles,
@@ -108,7 +92,6 @@ __all__ = [
     "INatClient",
     "INatError",
     "INatFetcher",
-    "arrow_table_to_numpy",
     "benchmark_binning_algorithms",
     "bin_hexagonal",
     "bin_kdtree",
@@ -126,14 +109,10 @@ __all__ = [
     "compute_morans_i",
     "compute_spatially_variable_labels",
     "compute_square_bins",
-    "dask_bin_transcripts",
-    "dask_compute_spatial_metrics",
+    "dask_bin_points",
     "decode_tags",
-    "download_dataset",
     "enforce_memory_limit",
     "explode_tags",
-    "from_anndata",
-    "generate_vectorized_mock_data",
     "get_bin_centers",
     "hex_polygons_lonlat",
     "in_bbox",
@@ -142,8 +121,6 @@ __all__ = [
     "load_hotspots",
     "load_photos",
     "load_tile_with_halo",
-    "load_transcript_arrow",
-    "load_transcript_data",
     "observations_to_photos",
     "parse_bbox",
     "partition_dataset_to_tiles",
@@ -153,16 +130,10 @@ __all__ = [
     "profile_memory",
     "profile_out_of_core_execution",
     "project_lonlat",
-    "read_anndata",
     "read_yfcc_metadata",
-    "read_zarr",
-    "save_anndata",
     "save_hotspots",
     "save_photos",
     "stitch_out_of_core_results",
-    "stream_zarr_anndata",
-    "to_anndata",
     "to_pyg_data",
-    "to_zarr",
     "unproject_xy",
 ]
