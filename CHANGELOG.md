@@ -5,6 +5,20 @@ All notable changes to the `spatial_pipeline` project will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Local Getis-Ord Gi* hot-spot statistic (`compute_getis_ord_gi_star`), verified against the textbook formula.
+- Vectorized Benjamini-Hochberg correction (`fdr_bh`), applied per tag across hexes; replaces the per-label loop.
+- `compute_hotspots` now returns significant per-tag hot spots (`local_hotspots`, saved as `local_hotspots.parquet`), photographer-density Gi* per hex, and a `hotspot_hexes` count in the tag ranking. New `alpha` option / `--alpha` flag.
+- Map: "Only significant hot spots" filter, and Gi* z-scores in the tooltip and top-hexes table.
+- `flickr` module and `fetch-flickr` CLI command: throttled, retrying `flickr.photos.search` client; fetcher that partitions by upload-date window and splits windows over Flickr's ~4,000-result cap in time, then space; resumable per-window Parquet cache; optional open-license filter. Output keeps owner name, title, license and thumbnail URL for attribution and later embedding work. Tested against a simulated API; not run live, since Flickr now issues API keys only to Pro accounts.
+- `inat` module and `fetch-inat` CLI command (no API key): iNaturalist observations with photos become photo-table rows (observer = photographer, species common name + group = tags). Pages by observation id to avoid the 10,000-result cap; throttled to ~1 request/s with a per-run request budget; resumable per-page cache tied to the query; excludes obscured coordinates and observations with location uncertainty above 1 km; defaults to research grade and Creative Commons photos. Verified live on Denver-area data.
+- Shared `_http.ThrottledJSONClient` (throttling and retries) used by the Flickr and iNaturalist clients.
+
+### Fixed
+- CI: ruff errors in `graphs.py` / `out_of_core.py`, mypy errors from zarr 3 typing and the pinned Python version; pandas floor raised to 2.0.
+
 ## [0.5.0] - 2026-11-03
 
 Pivot from spatial transcriptomics to geotagged photo hotspots (milestone 1 of `PLAN.md`).

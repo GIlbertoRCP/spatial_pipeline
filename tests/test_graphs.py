@@ -140,7 +140,7 @@ def test_spatial_autocorrelation_morans_i():
         [4.0, 10.0]
     ])
 
-    morans_i, z_scores, p_values = compute_morans_i(counts, adj)
+    morans_i, _, _ = compute_morans_i(counts, adj)
     assert len(morans_i) == 2
     # Label 0 should have high positive Moran's I
     assert morans_i[0] > 0.0
@@ -174,3 +174,61 @@ def test_compute_spatially_variable_labels():
     assert list(df_svg.columns) == ["label", "morans_i", "gearys_c", "z_score", "p_value", "fdr_p_value"]
     assert len(df_svg) == 2
     assert df_svg.iloc[0]["label"] == "GENE_A"
+
+
+def test_fdr_bh_matches_scipy():
+    from scipy.stats import false_discovery_control
+
+    from spatial_pipeline.graphs import fdr_bh
+
+    rng = np.random.default_rng(3)
+    p = rng.uniform(0, 1, size=(40, 3)) ** 3
+    expected = np.column_stack([false_discovery_control(p[:, j]) for j in range(3)])
+    np.testing.assert_allclose(fdr_bh(p, axis=0), expected, rtol=1e-12)
+    np.testing.assert_allclose(fdr_bh(p.T, axis=1), expected.T, rtol=1e-12)
+    np.testing.assert_allclose(fdr_bh(p[:, 0]), expected[:, 0], rtol=1e-12)
+    assert fdr_bh(np.array([])).shape == (0,)
+
+
+def test_getis_ord_gi_star_matches_textbook_formula():
+    from spatial_pipeline.graphs import build_spatial_graph, compute_getis_ord_gi_star
+
+    rng = np.random.default_rng(7)
+    coords = rng.uniform(0, 10, size=(60, 2))
+    adj, _ = build_spatial_graph(coords, max_distance=2.0, backend="cpu")
+    X = rng.poisson(2.0, size=(60, 4)).astype(float)
+    hot = np.hypot(coords[:, 0] - 2.5, coords[:, 1] - 2.5) < 2.0
+    X[hot, 0] += 15  # plant a spatially clustered hot spot in column 0
+
+    z, p = compute_getis_ord_gi_star(csr_matrix(X), adj)
+
+    # Reference: Ord & Getis (1995) Gi* with binary weights including self, one bin at a time.
+    A = adj.toarray() != 0
+    n = len(X)
+    for j in range(X.shape[1]):
+        x = X[:, j]
+        xbar = x.mean()
+        s = np.sqrt((x ** 2).mean() - xbar ** 2)
+        for i in range(n):
+            w = A[i].astype(float)
+            w[i] = 1.0
+            ref = (w @ x - xbar * w.sum()) / (s * np.sqrt((n * (w ** 2).sum() - w.sum() ** 2) / (n - 1)))
+            assert z[i, j] == pytest.approx(ref, rel=1e-9, abs=1e-12)
+
+    assert hot.sum() >= 3
+    assert z[hot, 0].mean() > 2.0
+    assert z[hot, 0].mean() > z[~hot, 0].mean() + 2.0
+    assert np.all((p >= 0) & (p <= 1))
+
+    z1, p1 = compute_getis_ord_gi_star(X[:, 0], adj)
+    np.testing.assert_allclose(z1, z[:, 0])
+    np.testing.assert_allclose(p1, p[:, 0])
+
+
+def test_getis_ord_gi_star_constant_column_is_zero():
+    from spatial_pipeline.graphs import build_spatial_graph, compute_getis_ord_gi_star
+
+    coords = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [5.0, 0.0]])
+    adj, _ = build_spatial_graph(coords, max_distance=1.1, backend="cpu")
+    z, p = compute_getis_ord_gi_star(np.ones((4, 1)), adj)
+    assert np.all(z == 0) and np.all(p == 1)

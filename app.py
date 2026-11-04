@@ -50,7 +50,8 @@ with st.sidebar:
 if not os.path.exists(os.path.join(out_dir, "meta.json")):
     st.info(
         f"No hotspot outputs found in `{out_dir}`. Create them with:\n\n"
-        "```\nspatial-pipeline ingest-yfcc --input <yfcc metadata> --output photos.parquet --bbox colorado\n"
+        "```\nspatial-pipeline fetch-inat --bbox denver --output photos.parquet\n"
+        "# or: spatial-pipeline ingest-yfcc --input <yfcc metadata> --output photos.parquet --bbox colorado\n"
         "spatial-pipeline hotspots --input photos.parquet --output-dir hotspots\n```"
     )
     st.stop()
@@ -58,6 +59,7 @@ if not os.path.exists(os.path.join(out_dir, "meta.json")):
 data = _load(out_dir)
 hexes: pd.DataFrame = data["hexes"]  # type: ignore[assignment]
 label_counts: pd.DataFrame = data["label_counts"]  # type: ignore[assignment]
+local_hotspots: pd.DataFrame = data["local_hotspots"]  # type: ignore[assignment]
 ranking: pd.DataFrame = data["ranking"]  # type: ignore[assignment]
 meta: dict = data["meta"]  # type: ignore[assignment]
 
@@ -66,6 +68,11 @@ with st.sidebar:
     options = [ALL_PHOTOS] + significant["label"].astype(str).tolist()
     tag = st.selectbox("Tag (significantly clustered, strongest first)", options)
     min_photographers = st.slider("Minimum photographers per hex", 1, 20, 1)
+    alpha = float(meta.get("alpha", 0.05))
+    only_hot = st.checkbox(
+        "Only significant hot spots",
+        help=f"Hexes whose neighborhood is significantly above average (Getis-Ord Gi*, FDR < {alpha:g}).",
+    )
     st.caption(f"{len(significant):,} of {len(ranking):,} analyzed tags are significantly clustered (FDR < 0.05).")
 
 c1, c2, c3, c4 = st.columns(4)
@@ -76,11 +83,21 @@ c4.metric("Hex size", f"{meta['resolution'] / 1000:g} km")
 
 if tag == ALL_PHOTOS:
     view = hexes.assign(value=hexes["photographers"])
+    hot = (view["density_gi_z"] > 0) & (view["density_fdr"] < alpha)
+    view = view.assign(gi_z=view["density_gi_z"].where(hot))
 else:
     per_tag = label_counts[label_counts["label"] == tag][["hex_id", "photographers"]]
     view = hexes.drop(columns="photographers").merge(per_tag, on="hex_id")
     view = view.assign(value=view["photographers"])
-view = view[view["value"] >= min_photographers].reset_index(drop=True)
+    tag_hot = local_hotspots.loc[local_hotspots["label"] == tag, ["hex_id", "gi_z"]]
+    view = view.merge(tag_hot, on="hex_id", how="left")
+view = view[view["value"] >= min_photographers]
+if only_hot:
+    view = view[view["gi_z"].notna()]
+view = view.reset_index(drop=True)
+view["hotspot"] = np.where(
+    view["gi_z"].notna(), "hot spot, Gi* z = " + view["gi_z"].round(1).astype(str), "not significant"
+)
 
 if view.empty:
     st.warning("No hexes match the current filters.")
@@ -91,7 +108,7 @@ view[["r_", "g_", "b_", "a_"]] = _colors(view["value"].to_numpy())
 
 layer = pdk.Layer(
     "PolygonLayer",
-    data=view[["polygon", "value", "photos", "lon", "lat", "r_", "g_", "b_", "a_"]],
+    data=view[["polygon", "value", "photos", "hotspot", "lon", "lat", "r_", "g_", "b_", "a_"]],
     get_polygon="polygon",
     get_fill_color="[r_, g_, b_, a_]",
     get_line_color=[80, 80, 80, 80],
@@ -122,7 +139,7 @@ st.pydeck_chart(
         initial_view_state=view_state,
         map_provider="carto",
         map_style="light",
-        tooltip={"text": "{value} photographers\n{photos} photos in hex\n{lat}, {lon}"},
+        tooltip={"text": "{value} photographers\n{photos} photos in hex\n{hotspot}\n{lat}, {lon}"},
     ),
     height=620,
 )
@@ -130,12 +147,12 @@ st.pydeck_chart(
 left, right = st.columns(2)
 with left:
     st.subheader("Top hexes")
-    top = view.nlargest(15, "value")[["value", "photos", "lat", "lon"]].rename(columns={"value": "photographers"})
+    top = view.nlargest(15, "value")[["value", "photos", "gi_z", "lat", "lon"]].rename(columns={"value": "photographers"})
     top["map"] = [f"https://www.google.com/maps?q={la:.5f},{lo:.5f}" for la, lo in zip(top["lat"], top["lon"])]
     st.dataframe(top, hide_index=True, column_config={"map": st.column_config.LinkColumn("map", display_text="open")})
 with right:
     st.subheader("Most clustered tags")
     st.dataframe(
-        ranking.head(50)[["label", "morans_i", "fdr_p_value", "photographers", "hexes"]],
+        ranking.head(50)[["label", "morans_i", "fdr_p_value", "photographers", "hexes", "hotspot_hexes"]],
         hide_index=True,
     )

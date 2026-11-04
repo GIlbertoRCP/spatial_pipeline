@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, diags, identity
 from scipy.spatial import KDTree
 
 logger = logging.getLogger(__name__)
@@ -551,6 +551,88 @@ def compute_gearys_c(
     return gearys_c
 
 
+def fdr_bh(p_values: np.ndarray, axis: int = 0) -> np.ndarray:
+    """
+    Benjamini-Hochberg FDR-adjusted p-values, computed independently along `axis`.
+
+    Args:
+        p_values: Array of p-values (1D, or 2D to correct each column/row separately).
+        axis: Axis holding the family of tests to correct together.
+
+    Returns:
+        np.ndarray: Adjusted p-values with the same shape as `p_values`.
+    """
+    p = np.moveaxis(np.asarray(p_values, dtype=np.float64), axis, 0)
+    n = p.shape[0]
+    if n == 0:
+        return np.moveaxis(p.copy(), 0, axis)
+
+    order = np.argsort(p, axis=0)
+    ranked = np.take_along_axis(p, order, axis=0)
+    ranks = np.arange(1, n + 1, dtype=np.float64).reshape((n,) + (1,) * (p.ndim - 1))
+    # Enforce monotonicity from the largest p-value down, then cap at 1.
+    adjusted = np.minimum(np.minimum.accumulate((ranked * n / ranks)[::-1], axis=0)[::-1], 1.0)
+
+    out = np.empty_like(adjusted)
+    np.put_along_axis(out, order, adjusted, axis=0)
+    return np.moveaxis(out, 0, axis)
+
+
+def compute_getis_ord_gi_star(
+    values: Any,
+    adjacency_matrix: csr_matrix
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Local Getis-Ord Gi* hotspot statistic for every bin and column, with binary weights.
+
+    Gi* compares the sum of values in each bin's neighborhood (the bin itself plus its
+    neighbors) with what is expected under spatial randomness. It is returned as a z-score:
+    large positive values mark hot spots, large negative values cold spots.
+
+    Parameters:
+        values: Matrix of shape (N_bins, N_labels) or 1D array of shape (N_bins,).
+            Densified internally, so memory scales with N_bins * N_labels.
+        adjacency_matrix: Spatial adjacency matrix of shape (N_bins, N_bins); any non-zero
+            entry counts as a neighbor and the diagonal is ignored (self is always included).
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]:
+            - z_scores: Gi* z-scores, same shape as `values`.
+            - p_values: Two-sided normal p-values, same shape as `values`.
+    """
+    from scipy.stats import norm
+
+    X = values.toarray() if hasattr(values, "toarray") else np.asarray(values)
+    X = X.astype(np.float64)
+    is_1d = X.ndim == 1
+    if is_1d:
+        X = X[:, None]
+
+    N = X.shape[0]
+    if N <= 1:
+        z = np.zeros_like(X)
+        p = np.ones_like(X)
+        return (z[:, 0], p[:, 0]) if is_1d else (z, p)
+
+    A = csr_matrix(adjacency_matrix, dtype=np.float64)
+    A.data = (A.data != 0).astype(np.float64)
+    A = A - diags(A.diagonal())
+    W = A + identity(N, format="csr")
+
+    w_sum = np.asarray(W.sum(axis=1)).ravel()  # binary weights: sum of squares == sum
+    mean = X.mean(axis=0)
+    std = np.sqrt(np.maximum((X ** 2).mean(axis=0) - mean ** 2, 0.0))
+    row_scale = np.sqrt(np.maximum(N * w_sum - w_sum ** 2, 0.0) / (N - 1))
+
+    numer = W @ X - np.outer(w_sum, mean)
+    denom = np.outer(row_scale, std)
+    z = np.zeros_like(X)
+    np.divide(numer, denom, out=z, where=denom > 1e-12)
+    p = 2.0 * norm.sf(np.abs(z))
+
+    return (z[:, 0], p[:, 0]) if is_1d else (z, p)
+
+
 def compute_spatially_variable_labels(
     sparse_counts: Any,
     label_names: Any,
@@ -575,17 +657,7 @@ def compute_spatially_variable_labels(
     morans_i, z_scores, p_values = compute_morans_i(sparse_counts, adjacency_matrix)
     gearys_c = compute_gearys_c(sparse_counts, adjacency_matrix)
 
-    G = len(p_values)
-    sorted_indices = np.argsort(p_values)
-    sorted_p = p_values[sorted_indices]
-    fdr = np.zeros(G, dtype=np.float64)
-
-    cummin = 1.0
-    for i in range(G - 1, -1, -1):
-        rank = i + 1
-        adj_p = (sorted_p[i] * G) / rank
-        cummin = min(cummin, adj_p)
-        fdr[sorted_indices[i]] = min(1.0, cummin)
+    fdr = fdr_bh(p_values)
 
     df = pd.DataFrame({
         "label": label_names_arr,

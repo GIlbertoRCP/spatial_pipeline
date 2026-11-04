@@ -89,6 +89,8 @@ photo-specific lives in adapters around it.
 Each one ends with something shippable.
 
 ### M1: Colorado hotspot map (metadata only)
+- **Data source: iNaturalist** (`fetch-inat`, free, no key). Flickr's API turned out to require a paid Pro account. The project now leans toward wildlife and nature photography: species are the labels, observers the photographers. YFCC100M (`ingest-yfcc`) stays available for landscapes/cities and the M5 scale benchmark.
+- Seasonality (M3) becomes a headline feature with species data: when to go, not just where (elk rut, wildflower peaks, migration).
 - Ingest YFCC metadata, filter to the Colorado bounding box, dedupe, and apply the per-user cap.
 - Generalize the engine: `gene` → `label`, lat/lon projection, and real-data loaders replacing the mock generator.
 - Hex hotspot map by Flickr tag; global Moran's I to rank which tags cluster spatially.
@@ -97,7 +99,7 @@ Each one ends with something shippable.
 ### M2: Scene understanding (embeddings)
 - Resumable, rate-limited image fetcher, then CLIP embeddings (OpenCLIP) stored in Zarr.
 - Clustering into scene types and CLIP-prompt naming.
-- Local statistics (Gi\* / LISA) answering "where are the waterfall / alpine-lake / fall-color hotspots?"
+- Local statistics (Gi\* / LISA) answering "where are the waterfall / alpine-lake / fall-color hotspots?" (**Gi\* done** for tags and photographer density; scene types will plug into the same code)
 - **Done when:** you can pick a scene type and see its significant hotspots on the map.
 
 ### M3: Hidden gems + timing

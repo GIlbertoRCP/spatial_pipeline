@@ -1,7 +1,7 @@
 """
 spatial_pipeline: Spatial hotspot engine for geotagged photos and other labeled points.
 
-Provides YFCC100M photo ingestion, lon/lat projection, hex/square/tree binning,
+Provides iNaturalist and YFCC100M photo ingestion, lon/lat projection, hex/square/tree binning,
 photographer-weighted hotspot analysis, GPU/CPU spatial graph generation (RAPIDS cuGraph/cuML),
 spatial autocorrelation (Moran's I / Geary's C), Dask/Zarr out-of-core streaming,
 and AnnData/PyG interoperability.
@@ -20,6 +20,12 @@ from .binning import (
     build_sparse_matrix,
     compute_square_bins,
     get_bin_centers,
+)
+from .flickr import (
+    FlickrClient,
+    FlickrError,
+    FlickrFetcher,
+    photos_from_response,
 )
 from .geo import (
     COLORADO_BBOX,
@@ -47,6 +53,12 @@ from .hotspots import (
     hex_polygons_lonlat,
     load_hotspots,
     save_hotspots,
+)
+from .inat import (
+    INatClient,
+    INatError,
+    INatFetcher,
+    observations_to_photos,
 )
 from .io import (
     arrow_table_to_numpy,
@@ -89,7 +101,13 @@ __all__ = [
     "COLORADO_BBOX",
     "DEFAULT_CRS",
     "DENVER_METRO_BBOX",
+    "FlickrClient",
+    "FlickrError",
+    "FlickrFetcher",
     "HotspotResult",
+    "INatClient",
+    "INatError",
+    "INatFetcher",
     "arrow_table_to_numpy",
     "benchmark_binning_algorithms",
     "bin_hexagonal",
@@ -126,8 +144,10 @@ __all__ = [
     "load_tile_with_halo",
     "load_transcript_arrow",
     "load_transcript_data",
+    "observations_to_photos",
     "parse_bbox",
     "partition_dataset_to_tiles",
+    "photos_from_response",
     "process_tile_out_of_core",
     "process_tiles_parallel_out_of_core",
     "profile_memory",

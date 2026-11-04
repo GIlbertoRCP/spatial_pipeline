@@ -22,3 +22,7 @@ mock_transcripts.csv
 *.png
 *.npz
 .DS_Store
+.env
+.flickr_cache/
+hotspots/
+.inat_cache/

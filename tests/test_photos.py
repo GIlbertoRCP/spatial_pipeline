@@ -235,3 +235,38 @@ def test_streamlit_app_renders(tmp_path, photos, monkeypatch):
     at.selectbox[0].select("red rocks").run()
     assert not at.exception
     assert not at.warning
+
+    at.checkbox[0].check().run()  # only significant hot spots
+    assert not at.exception
+    assert not at.warning
+    top_hexes = at.dataframe[0].value
+    assert len(top_hexes) > 0 and top_hexes["gi_z"].notna().all()
+
+
+def test_local_hotspots_mark_landmark_hexes(photos):
+    result = compute_hotspots(photos, resolution=1000.0, min_label_photographers=5, min_hex_photographers=1)
+    local = result.local_hotspots
+    assert (local["gi_z"] > 0).all() and (local["fdr_p_value"] < 0.05).all()
+    assert not local["label"].isin(["colorado", "mountains"]).any()
+
+    hexes = result.hexes.set_index("hex_id")
+    for name, (lon0, lat0, tags) in LANDMARKS.items():
+        hot = hexes.loc[local.loc[local["label"] == tags[0], "hex_id"]]
+        assert len(hot) > 0, name
+        # Every hot-spot hex for a landmark's tag lies within ~3 km of that landmark.
+        assert (np.hypot(hot["lon"] - lon0, hot["lat"] - lat0) < 0.03).all(), name
+
+    ranking = result.ranking.set_index("label")
+    assert ranking.loc["red rocks", "hotspot_hexes"] > 0
+    assert ranking.loc["colorado", "hotspot_hexes"] == 0
+    stats = hexes.loc[result.stats_hex_ids]
+    assert stats["density_gi_z"].notna().all()
+    assert hexes.drop(index=result.stats_hex_ids)["density_gi_z"].isna().all()
+
+
+def test_load_hotspots_without_local_file(tmp_path, photos):
+    out_dir = tmp_path / "old"
+    save_hotspots(compute_hotspots(photos, min_label_photographers=5, min_hex_photographers=1), str(out_dir))
+    (out_dir / "local_hotspots.parquet").unlink()
+    loaded = load_hotspots(str(out_dir))
+    assert loaded["local_hotspots"].empty

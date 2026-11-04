@@ -5,6 +5,11 @@ Counts are unique photographers, not photos: one person uploading 500 shots from
 backyard is one vote for that hex, not 500. Tags are ranked by spatial autocorrelation
 (Moran's I) of their per-hex share, which surfaces tags that concentrate in specific
 places ('waterfall', 'redrocks') rather than tags that simply follow where people are.
+Local Getis-Ord Gi* then marks *which* hexes are statistically significant hot spots for
+each tag and for overall photographer density.
+
+All statistics compare active (photographed) hexes with each other: unphotographed land
+is not part of the graph, so "hot" means hot relative to other places people photograph.
 """
 
 from __future__ import annotations
@@ -20,7 +25,12 @@ from scipy.sparse import csr_matrix, diags
 
 from .binning import bin_hexagonal, get_bin_centers
 from .geo import DEFAULT_CRS, project_lonlat, unproject_xy
-from .graphs import build_spatial_graph, compute_spatially_variable_labels
+from .graphs import (
+    build_spatial_graph,
+    compute_getis_ord_gi_star,
+    compute_spatially_variable_labels,
+    fdr_bh,
+)
 from .photos import DEFAULT_STOP_TAGS, explode_tags
 
 
@@ -30,10 +40,14 @@ class HotspotResult:
     Output of `compute_hotspots`.
 
     Attributes:
-        hexes: One row per active hex: hex_id, q, r, x, y, lon, lat, photos, photographers.
+        hexes: One row per active hex: hex_id, q, r, x, y, lon, lat, photos, photographers,
+            plus density_gi_z / density_fdr (Gi* of log photographer counts; NaN for hexes
+            outside the statistics).
         label_counts: Long table of (hex_id, label, photographers) for the selected labels.
+        local_hotspots: Significant hot spots per tag: (hex_id, label, gi_z, fdr_p_value),
+            with gi_z > 0 and FDR-adjusted p-value below `alpha` (corrected per tag).
         ranking: Labels ranked by Moran's I with Geary's C, z-score, FDR p-value,
-            total photographers and number of hexes.
+            total photographers, number of hexes, and number of significant hot-spot hexes.
         matrix: Sparse (num_hexes, num_labels) matrix of unique-photographer counts.
         labels: Label names, aligned with matrix columns.
         adjacency: Hex adjacency (immediate neighbors) over the hexes used for statistics.
@@ -44,6 +58,7 @@ class HotspotResult:
 
     hexes: pd.DataFrame
     label_counts: pd.DataFrame
+    local_hotspots: pd.DataFrame
     ranking: pd.DataFrame
     matrix: csr_matrix
     labels: np.ndarray
@@ -71,6 +86,7 @@ def compute_hotspots(
     min_hex_photographers: int = 3,
     neighbor_rings: int = 1,
     normalize: Literal["share", "count"] = "share",
+    alpha: float = 0.05,
     stop_tags: frozenset[str] | set[str] = DEFAULT_STOP_TAGS,
 ) -> HotspotResult:
     """
@@ -89,6 +105,7 @@ def compute_hotspots(
             isolated hexes inflate Moran's I (N / S0 grows while no neighbor pairs are added).
         normalize: 'share' ranks tags by their fraction of each hex's photographers;
             'count' uses raw photographer counts (dominated by overall photo density).
+        alpha: FDR level for local Gi* hot spots.
         stop_tags: Tags to ignore.
 
     Returns:
@@ -170,9 +187,35 @@ def compute_hotspots(
     ranking["photographers"] = ranking["label"].map(selected).astype("int64")
     ranking["hexes"] = ranking["label"].map(label_counts["label"].value_counts()).fillna(0).astype("int64")
 
+    hexes["density_gi_z"] = np.nan
+    hexes["density_fdr"] = np.nan
+    local_hotspots = pd.DataFrame({
+        "hex_id": pd.Series(dtype="int64"), "label": pd.Series(dtype="object"),
+        "gi_z": pd.Series(dtype="float64"), "fdr_p_value": pd.Series(dtype="float64"),
+    })
+    if len(stats_hex_ids) > 1:
+        density_z, density_p = compute_getis_ord_gi_star(np.log1p(photographers_per_hex[stats_hex_ids]), adjacency)
+        hexes.loc[stats_hex_ids, "density_gi_z"] = density_z
+        hexes.loc[stats_hex_ids, "density_fdr"] = fdr_bh(density_p)
+
+        if len(labels):
+            gi_z, gi_p = compute_getis_ord_gi_star(stats_matrix, adjacency)
+            gi_fdr = fdr_bh(gi_p, axis=0)  # one family of tests per tag
+            rows, cols = np.nonzero((gi_z > 0) & (gi_fdr < alpha))
+            local_hotspots = pd.DataFrame({
+                "hex_id": stats_hex_ids[rows],
+                "label": labels[cols],
+                "gi_z": gi_z[rows, cols],
+                "fdr_p_value": gi_fdr[rows, cols],
+            })
+    ranking["hotspot_hexes"] = (
+        ranking["label"].map(local_hotspots["label"].value_counts()).fillna(0).astype("int64")
+    )
+
     return HotspotResult(
         hexes=hexes,
         label_counts=label_counts,
+        local_hotspots=local_hotspots,
         ranking=ranking,
         matrix=matrix,
         labels=labels,
@@ -207,7 +250,8 @@ def hex_polygons_lonlat(x: np.ndarray, y: np.ndarray, resolution: float, crs: st
 
 def save_hotspots(result: HotspotResult, out_dir: str, extra_meta: dict[str, object] | None = None) -> None:
     """
-    Writes hotspot outputs to a directory: hexes.parquet, label_counts.parquet, ranking.csv, meta.json.
+    Writes hotspot outputs to a directory: hexes.parquet, label_counts.parquet,
+    local_hotspots.parquet, ranking.csv, meta.json.
 
     Args:
         result: Output of `compute_hotspots`.
@@ -218,6 +262,7 @@ def save_hotspots(result: HotspotResult, out_dir: str, extra_meta: dict[str, obj
     path.mkdir(parents=True, exist_ok=True)
     result.hexes.to_parquet(path / "hexes.parquet", index=False)
     result.label_counts.to_parquet(path / "label_counts.parquet", index=False)
+    result.local_hotspots.to_parquet(path / "local_hotspots.parquet", index=False)
     result.ranking.to_csv(path / "ranking.csv", index=False)
     meta: dict[str, object] = {
         "resolution": result.resolution,
@@ -240,12 +285,20 @@ def load_hotspots(out_dir: str) -> dict[str, object]:
         out_dir: Directory containing the hotspot outputs.
 
     Returns:
-        dict[str, object]: Keys 'hexes', 'label_counts', 'ranking' (DataFrames) and 'meta' (dict).
+        dict[str, object]: Keys 'hexes', 'label_counts', 'local_hotspots', 'ranking' (DataFrames)
+            and 'meta' (dict). Outputs written before local hot spots existed load with an
+            empty 'local_hotspots' table.
     """
     path = Path(out_dir)
+    local_path = path / "local_hotspots.parquet"
+    local = (
+        pd.read_parquet(local_path) if local_path.exists()
+        else pd.DataFrame(columns=["hex_id", "label", "gi_z", "fdr_p_value"])
+    )
     return {
         "hexes": pd.read_parquet(path / "hexes.parquet"),
         "label_counts": pd.read_parquet(path / "label_counts.parquet"),
+        "local_hotspots": local,
         "ranking": pd.read_csv(path / "ranking.csv"),
         "meta": json.loads((path / "meta.json").read_text(encoding="utf-8")),
     }
