@@ -29,9 +29,15 @@ YFCC_FIELDS_23 = [
 YFCC_FIELDS_25 = ["line_number", "photo_id", "photo_hash"] + YFCC_FIELDS_23[1:]
 
 _FIELDS_BY_WIDTH = {23: YFCC_FIELDS_23, 25: YFCC_FIELDS_25}
-_NEEDED = ["photo_id", "user_id", "date_taken", "user_tags", "longitude", "latitude", "accuracy", "marker"]
+_NEEDED = [
+    "photo_id", "user_id", "user_nickname", "date_taken", "title", "user_tags", "longitude", "latitude",
+    "accuracy", "page_url", "download_url", "license_name", "marker",
+]
 
 PHOTO_COLUMNS = ["photo_id", "user_id", "lon", "lat", "accuracy", "taken_at", "tags"]
+
+# Flickr static image URLs: .../<server>/<id>_<secret>.jpg -> 150px square thumbnail.
+_FLICKR_IMAGE = r"^https?://[^/]+/(?P<server>\d+)/(?P<id>\d+)_(?P<secret>[0-9a-f]+)\.jpg$"
 
 # Tags that describe the camera, app or upload rather than the scene or place.
 DEFAULT_STOP_TAGS = frozenset({
@@ -87,7 +93,8 @@ def clean_yfcc_frame(
         include_videos: Keep videos as well as photos.
 
     Returns:
-        pd.DataFrame: Columns ['photo_id', 'user_id', 'lon', 'lat', 'accuracy', 'taken_at', 'tags'].
+        pd.DataFrame: Columns ['photo_id', 'user_id', 'lon', 'lat', 'accuracy', 'taken_at', 'tags',
+        'owner_name', 'title', 'license', 'thumbnail_url', 'page_url'].
     """
     if not include_videos:
         df = df[df["marker"].astype(str).str.strip() == "0"]
@@ -111,8 +118,26 @@ def clean_yfcc_frame(
         "accuracy": accuracy[keep],
         "taken_at": pd.to_datetime(df["date_taken"], errors="coerce", format="ISO8601").to_numpy(),
         "tags": decode_tags(df["user_tags"]).to_numpy(),
+        "owner_name": _decode(df["user_nickname"]),
+        "title": _decode(df["title"]),
+        "license": _decode(df["license_name"]),
+        "thumbnail_url": _flickr_thumbnail(df["download_url"]),
+        "page_url": df["page_url"].fillna("").astype(str).to_numpy(),
     })
     return out
+
+
+def _decode(raw: pd.Series) -> np.ndarray:
+    raw = raw.fillna("").astype(str)
+    uniques = pd.unique(raw)
+    decoded = {value: unquote_plus(value) for value in uniques}
+    return np.asarray(raw.map(decoded).to_numpy())
+
+
+def _flickr_thumbnail(download_url: pd.Series) -> np.ndarray:
+    parts = download_url.fillna("").astype(str).str.extract(_FLICKR_IMAGE)
+    thumb = "https://live.staticflickr.com/" + parts["server"] + "/" + parts["id"] + "_" + parts["secret"] + "_q.jpg"
+    return np.asarray(thumb.fillna("").to_numpy())
 
 
 def _iter_tsv_chunks(path: str, chunksize: int) -> Iterator[pd.DataFrame]:
@@ -193,7 +218,8 @@ def read_yfcc_metadata(
         chunksize: Raw rows read per chunk.
 
     Returns:
-        pd.DataFrame: Columns ['photo_id', 'user_id', 'lon', 'lat', 'accuracy', 'taken_at', 'tags'].
+        pd.DataFrame: Columns ['photo_id', 'user_id', 'lon', 'lat', 'accuracy', 'taken_at', 'tags',
+        'owner_name', 'title', 'license', 'thumbnail_url', 'page_url'].
 
     Raises:
         FileNotFoundError: If the file does not exist.
@@ -215,7 +241,8 @@ def read_yfcc_metadata(
 def _empty_dtypes() -> dict[str, str]:
     return {
         "photo_id": "object", "user_id": "object", "lon": "float64", "lat": "float64",
-        "accuracy": "int16", "taken_at": "datetime64[ns]", "tags": "object",
+        "accuracy": "int16", "taken_at": "datetime64[ns]", "tags": "object", "owner_name": "object",
+        "title": "object", "license": "object", "thumbnail_url": "object", "page_url": "object",
     }
 
 

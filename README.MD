@@ -50,6 +50,11 @@ Design choices that matter for real photo data:
   more of a tag than expected. P-values are FDR-corrected separately for each tag (thousands of
   hexes means thousands of tests). Comparisons are among photographed hexes only, so "hot"
   means hot relative to other places people shoot.
+- **When, not just where.** For every tag, `hotspots` also writes month-of-year and hour-of-day
+  profiles (`timing.parquet`), counted in unique photographers, with a *lift* against all photos.
+  People are outdoors more in summer and at midday, so lift is what separates a real seasonal
+  pattern (elk in the September rut) from that general bias. The tag ranking lists peak months,
+  and the map shows both profiles for the selected tag.
 - **No isolated hexes in the statistics.** Hexes without neighbors would inflate Moran's I under
   binary weights, so they are excluded (they still appear on the map).
 - **No blurred locations.** iNaturalist randomizes the public coordinates of threatened species
@@ -116,6 +121,10 @@ spatial-pipeline hotspots --input photos.parquet --output-dir hotspots --resolut
 spatial-pipeline ui
 ```
 
+In the map, pick a subject in the sidebar, then click any hexagon to open that spot. The panel
+shows its top subjects (★ = significant hot spot), photos with photographer credits, and a
+directions link. The selection is kept in the URL (`?hex=...`), so a spot can be shared as a link.
+
 `--bbox` accepts `colorado`, `denver`, or `min_lon,min_lat,max_lon,max_lat`.
 
 ### Python API
@@ -150,6 +159,7 @@ The spatial core is not photo-specific. It works on any labeled 2D points:
 | `inat` | Throttled, resumable iNaturalist fetcher (id-based paging, privacy and accuracy filters) |
 | `flickr` | Throttled, resumable Flickr API fetcher that splits queries around the result cap (Pro key) |
 | `hotspots` | Photographer-weighted hex hotspots and tag ranking |
+| `timing` | Month and hour-of-day profiles per tag, with lift against all photos |
 
 The generic `run`, `svg`, `export` and `benchmark` CLI commands still operate on any
 `x, y, label` CSV.

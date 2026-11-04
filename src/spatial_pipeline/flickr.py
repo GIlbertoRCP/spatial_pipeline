@@ -45,7 +45,7 @@ OPEN_LICENSES = "1,2,3,4,5,6,7,8,9,10"
 
 FLICKR_PHOTO_COLUMNS = [
     "photo_id", "user_id", "lon", "lat", "accuracy", "taken_at", "tags",
-    "uploaded_at", "owner_name", "title", "license", "thumbnail_url",
+    "uploaded_at", "owner_name", "title", "license", "thumbnail_url", "page_url",
 ]
 
 
@@ -159,6 +159,7 @@ def photos_from_response(photos: list[dict[str, Any]]) -> pd.DataFrame:
         "title": col("title").fillna("").astype(str),
         "license": col("license").fillna("").astype(str),
         "thumbnail_url": col("url_q").fillna("").astype(str),
+        "page_url": "https://www.flickr.com/photos/" + col("owner").astype(str) + "/" + col("id").astype(str),
     })
 
 

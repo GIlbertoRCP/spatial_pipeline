@@ -47,7 +47,7 @@ ICONIC_GROUPS = {
 
 INAT_PHOTO_COLUMNS = [
     "photo_id", "user_id", "lon", "lat", "accuracy", "accuracy_m", "taken_at", "tags",
-    "uploaded_at", "owner_name", "title", "license", "thumbnail_url", "attribution",
+    "uploaded_at", "owner_name", "title", "license", "thumbnail_url", "page_url", "attribution",
     "taxon_id", "taxon_name", "taxon_rank", "iconic_taxon", "quality_grade",
 ]
 
@@ -149,6 +149,7 @@ def observations_to_photos(results: list[dict[str, Any]]) -> pd.DataFrame:
             "title": f"{common} ({name})" if common != name else name,
             "license": photo.get("license_code") or "",
             "thumbnail_url": photo.get("url") or "",
+            "page_url": f"https://www.inaturalist.org/observations/{obs['id']}",
             "attribution": photo.get("attribution") or "",
             "taxon_id": taxon.get("id"),
             "taxon_name": name,

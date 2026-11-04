@@ -21,7 +21,12 @@ from spatial_pipeline.graphs import (
     build_spatial_graph,
     compute_spatially_variable_labels,
 )
-from spatial_pipeline.hotspots import compute_hotspots, save_hotspots
+from spatial_pipeline.hotspots import (
+    compute_hotspots,
+    sample_photos,
+    save_hotspots,
+    save_photo_samples,
+)
 from spatial_pipeline.io import (
     generate_vectorized_mock_data,
     load_transcript_data,
@@ -34,6 +39,7 @@ from spatial_pipeline.out_of_core import (
     profile_out_of_core_execution,
 )
 from spatial_pipeline.photos import load_photos, read_yfcc_metadata, save_photos
+from spatial_pipeline.timing import MONTH_NAMES, compute_timing, peak_bins, save_timing
 
 app = typer.Typer(
     help="Spatial Pipeline CLI: spatial hotspot engine for geotagged photos and other labeled points."
@@ -229,7 +235,13 @@ def hotspots(
         normalize=normalize,  # type: ignore[arg-type]
         alpha=alpha,
     )
+    timing = compute_timing(photos, labels=result.labels)
+    result.ranking["peak_months"] = [
+        ", ".join(MONTH_NAMES[m - 1] for m in peak_bins(timing, label, "month")) for label in result.ranking["label"]
+    ]
     save_hotspots(result, output_dir, extra_meta={"input": input, "normalize": normalize, "alpha": alpha})
+    save_timing(timing, output_dir)
+    save_photo_samples(sample_photos(photos, result), output_dir)
 
     console.print(
         f"[bold green][+] {len(result.hexes):,} active hexes ({len(result.stats_hex_ids):,} used for statistics), "
@@ -244,6 +256,7 @@ def hotspots(
     table.add_column("Photographers")
     table.add_column("Hexes")
     table.add_column("Hot-spot hexes")
+    table.add_column("Peak months")
     for rank, row in enumerate(result.ranking.head(top_n).itertuples(), start=1):
         table.add_row(
             str(rank),
@@ -253,6 +266,7 @@ def hotspots(
             f"{row.photographers:,}",
             f"{row.hexes:,}",
             f"{row.hotspot_hexes:,}",
+            str(row.peak_months),
         )
     console.print(table)
     console.print(f"[bold green][+] Wrote outputs to {output_dir}/ (open the map with `spatial-pipeline ui`)[/bold green]")
@@ -407,7 +421,8 @@ def ui() -> None:
     if not os.path.exists(app_path):
         app_path = "app.py"
     console.print(f"[bold green][*] Launching Streamlit dashboard from {app_path}...[/bold green]")
-    subprocess.run([sys.executable, "-m", "streamlit", "run", app_path], check=False)
+    # Run from the app folder so .streamlit/config.toml (the theme) is picked up.
+    subprocess.run([sys.executable, "-m", "streamlit", "run", app_path], check=False, cwd=os.path.dirname(os.path.abspath(app_path)))
 
 
 @app.command()

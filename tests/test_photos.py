@@ -223,8 +223,11 @@ def test_hex_polygons_match_hex_size(photos):
 def test_streamlit_app_renders(tmp_path, photos, monkeypatch):
     from streamlit.testing.v1 import AppTest
 
+    from spatial_pipeline.timing import compute_timing, save_timing
+
     out_dir = str(tmp_path / "hotspots")
     save_hotspots(compute_hotspots(photos, min_label_photographers=5, min_hex_photographers=1), out_dir)
+    save_timing(compute_timing(photos), out_dir)
     monkeypatch.setenv("HOTSPOTS_DIR", out_dir)
     app_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "app.py")
 
@@ -235,6 +238,8 @@ def test_streamlit_app_renders(tmp_path, photos, monkeypatch):
     at.selectbox[0].select("red rocks").run()
     assert not at.exception
     assert not at.warning
+    assert any(s.value == "When to go" for s in at.subheader)
+    assert any("Jul" in c.value and "19:00" in c.value for c in at.caption)  # fixture photos: July, 19:42
 
     at.checkbox[0].check().run()  # only significant hot spots
     assert not at.exception
@@ -270,3 +275,60 @@ def test_load_hotspots_without_local_file(tmp_path, photos):
     (out_dir / "local_hotspots.parquet").unlink()
     loaded = load_hotspots(str(out_dir))
     assert loaded["local_hotspots"].empty
+
+
+def test_yfcc_rows_carry_thumbnails_and_credits(photos):
+    assert photos["thumbnail_url"].str.match(r"^https://live\.staticflickr\.com/1/\d+_abc_q\.jpg$").all()
+    assert photos["page_url"].str.startswith("http://www.flickr.com/photos/").all()
+    assert (photos["license"] == "Attribution License").all()
+    assert photos["owner_name"].ne("").all()
+
+
+def test_sample_photos_one_per_photographer_per_group(photos):
+    from spatial_pipeline.hotspots import sample_photos
+    from spatial_pipeline.timing import ALL_LABEL
+
+    result = compute_hotspots(photos, min_label_photographers=5, min_hex_photographers=1)
+    samples = sample_photos(photos, result, per_group=4)
+
+    assert set(samples["label"]) <= set(result.labels) | {ALL_LABEL}
+    assert samples.groupby(["hex_id", "label"]).size().max() <= 4
+    owners = photos.set_index("photo_id")["user_id"]
+    users = samples.assign(user=samples["photo_id"].map(owners))
+    assert not users.duplicated(["hex_id", "label", "user"]).any()
+    # The prolific uploader's hex gets one sample, not 300.
+    prolific_hex = result.hexes.sort_values("photos").iloc[-1]["hex_id"]
+    assert len(samples[(samples["hex_id"] == prolific_hex) & (samples["label"] == ALL_LABEL)]) == 1
+    # No thumbnails -> empty sample.
+    assert sample_photos(photos.drop(columns="thumbnail_url"), result).empty
+
+
+def test_streamlit_app_selected_spot_panel(tmp_path, photos, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    from spatial_pipeline.hotspots import sample_photos, save_photo_samples
+
+    out_dir = str(tmp_path / "hotspots")
+    result = compute_hotspots(photos, min_label_photographers=5, min_hex_photographers=1)
+    save_hotspots(result, out_dir)
+    save_photo_samples(sample_photos(photos, result), out_dir)
+    monkeypatch.setenv("HOTSPOTS_DIR", out_dir)
+    app_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "app.py")
+
+    red_rocks_hex = int(result.local_hotspots.loc[result.local_hotspots["label"] == "red rocks", "hex_id"].iloc[0])
+    at = AppTest.from_file(app_path, default_timeout=60)
+    at.query_params["hex"] = str(red_rocks_hex)
+    at.run()
+    assert not at.exception
+    assert any(s.value == "Selected spot" for s in at.subheader)
+    assert any("photo-grid" in m.value and "staticflickr" in m.value for m in at.markdown)
+    subjects = at.dataframe[0].value
+    assert "★ red rocks" in set(subjects["subject"])  # ★ = significant hot spot for that subject
+
+    at.selectbox[0].select("red rocks").run()
+    assert not at.exception
+    assert any("★ significant hot spot" in m.value for m in at.markdown)
+
+    at.button[0].click().run()  # clear selection
+    assert not at.exception
+    assert not any(s.value == "Selected spot" for s in at.subheader)

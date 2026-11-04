@@ -15,7 +15,7 @@ is not part of the graph, so "hot" means hot relative to other places people pho
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -32,6 +32,7 @@ from .graphs import (
     fdr_bh,
 )
 from .photos import DEFAULT_STOP_TAGS, explode_tags
+from .timing import ALL_LABEL
 
 
 @dataclass
@@ -54,6 +55,8 @@ class HotspotResult:
         stats_hex_ids: hex_id of each row/column in `adjacency`.
         resolution: Hex center-to-center distance in CRS units (meters by default).
         crs: Projected CRS used for binning.
+        photo_hex_ids: hex_id of each input photo (aligned with the photo table's row order).
+        num_photographers: Distinct photographers across all input photos.
     """
 
     hexes: pd.DataFrame
@@ -66,6 +69,8 @@ class HotspotResult:
     stats_hex_ids: np.ndarray
     resolution: float
     crs: str
+    photo_hex_ids: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
+    num_photographers: int = 0
 
 
 def _unique_pair_counts(group_codes: np.ndarray, user_codes: np.ndarray, n_groups: int) -> np.ndarray:
@@ -223,6 +228,8 @@ def compute_hotspots(
         stats_hex_ids=stats_hex_ids,
         resolution=float(resolution),
         crs=crs,
+        photo_hex_ids=hex_of_photo,
+        num_photographers=int(user_codes.max()) + 1 if len(user_codes) else 0,
     )
 
 
@@ -248,6 +255,81 @@ def hex_polygons_lonlat(x: np.ndarray, y: np.ndarray, resolution: float, crs: st
     return ring.tolist()
 
 
+PHOTO_SAMPLE_COLUMNS = [
+    "hex_id", "label", "photo_id", "thumbnail_url", "page_url", "owner_name", "attribution",
+    "title", "license", "taken_at",
+]
+
+
+def sample_photos(
+    photos: pd.DataFrame,
+    result: HotspotResult,
+    per_group: int = 6,
+    stop_tags: frozenset[str] | set[str] = DEFAULT_STOP_TAGS,
+) -> pd.DataFrame:
+    """
+    Picks up to `per_group` photos with thumbnails for every (hex, tag) and every hex overall,
+    each from a different photographer, for display in the map.
+
+    Args:
+        photos: The photo table passed to `compute_hotspots` (same row order).
+        result: Output of `compute_hotspots`.
+        per_group: Photos to keep per (hex, tag) and per hex.
+        stop_tags: Tags to ignore (should match `compute_hotspots`).
+
+    Returns:
+        pd.DataFrame: Columns PHOTO_SAMPLE_COLUMNS; label is ALL_LABEL for the per-hex sample.
+        Empty if the photo table has no thumbnail URLs (e.g. older YFCC tables).
+    """
+    photos = photos.reset_index(drop=True)
+    empty = pd.DataFrame({c: pd.Series(dtype="object") for c in PHOTO_SAMPLE_COLUMNS})
+    if "thumbnail_url" not in photos or len(result.photo_hex_ids) != len(photos):
+        return empty
+
+    has_thumb = photos["thumbnail_url"].fillna("").astype(str).str.startswith("http").to_numpy()
+    if not has_thumb.any():
+        return empty
+
+    def col(name: str) -> pd.Series:
+        return photos[name] if name in photos else pd.Series("", index=photos.index)
+
+    base = pd.DataFrame({
+        "hex_id": result.photo_hex_ids,
+        "photo_id": photos["photo_id"].astype(str),
+        "user": photos["user_id"].astype(str),
+        "thumbnail_url": col("thumbnail_url").fillna("").astype(str),
+        "page_url": col("page_url").fillna("").astype(str),
+        "owner_name": col("owner_name").fillna("").astype(str),
+        "attribution": col("attribution").fillna("").astype(str),
+        "title": col("title").fillna("").astype(str),
+        "license": col("license").fillna("").astype(str),
+        "taken_at": pd.to_datetime(photos["taken_at"], errors="coerce").astype(str).replace("NaT", ""),
+    })[has_thumb]
+
+    tags = explode_tags(photos, stop_tags=stop_tags)
+    tags = tags[tags["label"].isin(set(result.labels)) & has_thumb[tags["photo_idx"].to_numpy()]]
+    per_tag = base.loc[tags["photo_idx"].to_numpy()].assign(label=tags["label"].to_numpy())
+    overall = base.assign(label=ALL_LABEL)
+
+    samples = pd.concat([overall, per_tag], ignore_index=True)
+    samples = samples.drop_duplicates(["hex_id", "label", "user"])
+    samples = samples.groupby(["hex_id", "label"], sort=False).head(per_group)
+    return samples[PHOTO_SAMPLE_COLUMNS].reset_index(drop=True)
+
+
+def save_photo_samples(samples: pd.DataFrame, out_dir: str) -> None:
+    """
+    Writes photo samples to `<out_dir>/photo_samples.parquet`.
+
+    Args:
+        samples: Output of `sample_photos`.
+        out_dir: Target directory (created if needed).
+    """
+    path = Path(out_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    samples.to_parquet(path / "photo_samples.parquet", index=False)
+
+
 def save_hotspots(result: HotspotResult, out_dir: str, extra_meta: dict[str, object] | None = None) -> None:
     """
     Writes hotspot outputs to a directory: hexes.parquet, label_counts.parquet,
@@ -271,6 +353,8 @@ def save_hotspots(result: HotspotResult, out_dir: str, extra_meta: dict[str, obj
         "num_stats_hexes": len(result.stats_hex_ids),
         "num_labels": len(result.labels),
         "num_photos": int(result.hexes["photos"].sum()),
+        "num_photographers": result.num_photographers,
+        "num_hotspot_hexes": int(result.local_hotspots["hex_id"].nunique()),
     }
     if extra_meta:
         meta.update(extra_meta)
@@ -286,8 +370,8 @@ def load_hotspots(out_dir: str) -> dict[str, object]:
 
     Returns:
         dict[str, object]: Keys 'hexes', 'label_counts', 'local_hotspots', 'ranking' (DataFrames)
-            and 'meta' (dict). Outputs written before local hot spots existed load with an
-            empty 'local_hotspots' table.
+            and 'meta' (dict), plus 'timing' and 'photo_samples' (DataFrames). Outputs written
+            before those files existed load them as empty tables.
     """
     path = Path(out_dir)
     local_path = path / "local_hotspots.parquet"
@@ -299,6 +383,14 @@ def load_hotspots(out_dir: str) -> dict[str, object]:
         "hexes": pd.read_parquet(path / "hexes.parquet"),
         "label_counts": pd.read_parquet(path / "label_counts.parquet"),
         "local_hotspots": local,
+        "timing": (
+            pd.read_parquet(path / "timing.parquet") if (path / "timing.parquet").exists()
+            else pd.DataFrame(columns=["label", "kind", "bin", "photographers", "share", "lift"])
+        ),
+        "photo_samples": (
+            pd.read_parquet(path / "photo_samples.parquet") if (path / "photo_samples.parquet").exists()
+            else pd.DataFrame(columns=PHOTO_SAMPLE_COLUMNS)
+        ),
         "ranking": pd.read_csv(path / "ranking.csv"),
         "meta": json.loads((path / "meta.json").read_text(encoding="utf-8")),
     }

@@ -90,7 +90,7 @@ Each one ends with something shippable.
 
 ### M1: Colorado hotspot map (metadata only)
 - **Data source: iNaturalist** (`fetch-inat`, free, no key). Flickr's API turned out to require a paid Pro account. The project now leans toward wildlife and nature photography: species are the labels, observers the photographers. YFCC100M (`ingest-yfcc`) stays available for landscapes/cities and the M5 scale benchmark.
-- Seasonality (M3) becomes a headline feature with species data: when to go, not just where (elk rut, wildflower peaks, migration).
+- Seasonality (M3) becomes a headline feature with species data: when to go, not just where (elk rut, wildflower peaks, migration). **Month and hour profiles with lift are done** (`timing`); golden-hour alignment via sun position is still to do.
 - Ingest YFCC metadata, filter to the Colorado bounding box, dedupe, and apply the per-user cap.
 - Generalize the engine: `gene` → `label`, lat/lon projection, and real-data loaders replacing the mock generator.
 - Hex hotspot map by Flickr tag; global Moran's I to rank which tags cluster spatially.
