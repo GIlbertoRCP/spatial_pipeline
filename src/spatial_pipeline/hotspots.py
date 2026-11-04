@@ -317,6 +317,93 @@ def sample_photos(
     return samples[PHOTO_SAMPLE_COLUMNS].reset_index(drop=True)
 
 
+def subject_info(photos: pd.DataFrame, labels: list[str] | np.ndarray) -> pd.DataFrame:
+    """
+    Group and scientific name for each tag, for friendlier display.
+
+    Uses iNaturalist's `iconic_taxon` / `taxon_name` columns when present (the most common value
+    among a tag's photos); broad group tags ('birds', ...) are their own group. Sources without
+    taxonomy (YFCC, Flickr) get empty strings.
+
+    Args:
+        photos: Photo table (same one passed to `compute_hotspots`).
+        labels: Tags to describe.
+
+    Returns:
+        pd.DataFrame: Columns ['label', 'group', 'scientific_name'].
+    """
+    from .inat import ICONIC_GROUPS
+
+    photos = photos.reset_index(drop=True)
+    out = pd.DataFrame({"label": list(labels)})
+    out["group"] = ""
+    out["scientific_name"] = ""
+    if out.empty or "iconic_taxon" not in photos or "taxon_name" not in photos:
+        return out
+
+    tags = explode_tags(photos, stop_tags=set())
+    tags = tags[tags["label"].isin(set(out["label"]))]
+    idx = tags["photo_idx"].to_numpy()
+    rows = pd.DataFrame({
+        "label": tags["label"].to_numpy(),
+        "group": photos["iconic_taxon"].map(ICONIC_GROUPS).fillna("").to_numpy()[idx],
+        "scientific_name": photos["taxon_name"].fillna("").astype(str).to_numpy()[idx],
+    })
+    groups = set(ICONIC_GROUPS.values())
+    rows.loc[rows["label"].isin(groups), "scientific_name"] = ""
+
+    def mode(series: pd.Series) -> str:
+        series = series[series != ""]
+        return str(series.mode().iloc[0]) if len(series) else ""
+
+    summary = rows.groupby("label").agg(group=("group", mode), scientific_name=("scientific_name", mode))
+    out = out.drop(columns=["group", "scientific_name"]).join(summary, on="label").fillna("")
+    out.loc[out["label"].isin(groups), "group"] = out["label"]
+    # A common name equal to the scientific name adds nothing.
+    out.loc[out["scientific_name"].str.lower() == out["label"].str.lower(), "scientific_name"] = ""
+    return out[["label", "group", "scientific_name"]]
+
+
+def monthly_label_counts(photos: pd.DataFrame, result: HotspotResult) -> pd.DataFrame:
+    """
+    Unique photographers per (hex, tag, month), plus ALL_LABEL rows for all photos per hex and month.
+
+    Args:
+        photos: The photo table passed to `compute_hotspots` (same row order).
+        result: Output of `compute_hotspots`.
+
+    Returns:
+        pd.DataFrame: Columns ['hex_id', 'label', 'month', 'photographers'] (month 1-12); photos
+        without a date are skipped.
+    """
+    photos = photos.reset_index(drop=True)
+    empty = pd.DataFrame({"hex_id": pd.Series(dtype="int64"), "label": pd.Series(dtype="object"),
+                          "month": pd.Series(dtype="int64"), "photographers": pd.Series(dtype="int64")})
+    if len(result.photo_hex_ids) != len(photos):
+        return empty
+    taken = pd.to_datetime(photos["taken_at"], errors="coerce")
+    if isinstance(taken.dtype, pd.DatetimeTZDtype):
+        taken = taken.dt.tz_localize(None)
+    month = taken.dt.month.to_numpy()
+    users = pd.factorize(photos["user_id"])[0]
+    dated = ~np.isnan(month)
+
+    overall = pd.DataFrame({"hex_id": result.photo_hex_ids[dated], "label": ALL_LABEL,
+                            "month": month[dated], "user": users[dated]})
+    tags = explode_tags(photos)
+    tags = tags[tags["label"].isin(set(result.labels))]
+    idx = tags["photo_idx"].to_numpy()
+    keep = dated[idx]
+    per_tag = pd.DataFrame({"hex_id": result.photo_hex_ids[idx][keep], "label": tags["label"].to_numpy()[keep],
+                            "month": month[idx][keep], "user": users[idx][keep]})
+    both = pd.concat([overall, per_tag], ignore_index=True)
+    if both.empty:
+        return empty
+    counts = both.drop_duplicates().groupby(["hex_id", "label", "month"]).size().rename("photographers").reset_index()
+    counts["month"] = counts["month"].astype("int64")
+    return counts
+
+
 def save_photo_samples(samples: pd.DataFrame, out_dir: str) -> None:
     """
     Writes photo samples to `<out_dir>/photo_samples.parquet`.
@@ -370,8 +457,8 @@ def load_hotspots(out_dir: str) -> dict[str, object]:
 
     Returns:
         dict[str, object]: Keys 'hexes', 'label_counts', 'local_hotspots', 'ranking' (DataFrames)
-            and 'meta' (dict), plus 'timing' and 'photo_samples' (DataFrames). Outputs written
-            before those files existed load them as empty tables.
+            and 'meta' (dict), plus 'timing', 'photo_samples', 'subjects' and 'monthly_counts'
+            (DataFrames). Outputs written before those files existed load them as empty tables.
     """
     path = Path(out_dir)
     local_path = path / "local_hotspots.parquet"
@@ -390,6 +477,14 @@ def load_hotspots(out_dir: str) -> dict[str, object]:
         "photo_samples": (
             pd.read_parquet(path / "photo_samples.parquet") if (path / "photo_samples.parquet").exists()
             else pd.DataFrame(columns=PHOTO_SAMPLE_COLUMNS)
+        ),
+        "subjects": (
+            pd.read_parquet(path / "subjects.parquet") if (path / "subjects.parquet").exists()
+            else pd.DataFrame(columns=["label", "group", "scientific_name"])
+        ),
+        "monthly_counts": (
+            pd.read_parquet(path / "monthly_counts.parquet") if (path / "monthly_counts.parquet").exists()
+            else pd.DataFrame(columns=["hex_id", "label", "month", "photographers"])
         ),
         "ranking": pd.read_csv(path / "ranking.csv"),
         "meta": json.loads((path / "meta.json").read_text(encoding="utf-8")),

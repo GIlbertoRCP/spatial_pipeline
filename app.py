@@ -127,6 +127,8 @@ label_counts: pd.DataFrame = data["label_counts"]  # type: ignore[assignment]
 local_hotspots: pd.DataFrame = data["local_hotspots"]  # type: ignore[assignment]
 timing: pd.DataFrame = data["timing"]  # type: ignore[assignment]
 photo_samples: pd.DataFrame = data["photo_samples"]  # type: ignore[assignment]
+subjects: pd.DataFrame = data["subjects"]  # type: ignore[assignment]
+monthly_counts: pd.DataFrame = data["monthly_counts"]  # type: ignore[assignment]
 ranking: pd.DataFrame = data["ranking"]  # type: ignore[assignment]
 meta: dict = data["meta"]  # type: ignore[assignment]
 alpha = float(meta.get("alpha", 0.05))
@@ -136,12 +138,62 @@ resolution = float(meta["resolution"])
 
 significant = ranking[ranking["fdr_p_value"] < alpha]
 photographers_by_tag = ranking.set_index("label")["photographers"].to_dict()
+info = subjects.set_index("label") if not subjects.empty else pd.DataFrame(columns=["group", "scientific_name"])
+group_of = info["group"].to_dict()
+sci_of = info["scientific_name"].to_dict()
+month_rows = timing[timing["kind"] == "month"]
+
+
+def _name(label: str) -> str:
+    sci = sci_of.get(label, "")
+    return f"{label} ({sci})" if sci else label
+
+
+def _pick_subject(label: str) -> None:
+    """Button callback: show this subject (clearing a group filter that would hide it)."""
+    st.session_state["group"] = "All"
+    st.session_state["subject"] = label
+
+
 with st.sidebar:
+    when = st.select_slider(
+        "When", options=["All year", *MONTH_NAMES], value="All year", key="when",
+        help="Pick a month to see what is in season and where it is photographed that month.",
+    )
+    month = None if when == "All year" else MONTH_NAMES.index(when) + 1
+
+    present_groups = [g for g in pd.Series([group_of.get(t, "") for t in significant["label"]]).value_counts().index if g]
+    group = "All"
+    if present_groups:
+        group = st.pills("Group", ["All", *present_groups], default="All", key="group") or "All"
+
+    candidates = significant["label"].astype(str)
+    if group != "All":
+        candidates = candidates[candidates.map(lambda t: group_of.get(t, "") == group)]
+    in_month: dict[str, tuple[int, float]] = {}
+    if month is not None:
+        rows = month_rows[(month_rows["bin"] == month) & month_rows["label"].isin(set(candidates))]
+        in_month = {r.label: (int(r.photographers), float(r.lift)) for r in rows.itertuples()}
+        candidates = pd.Series(sorted(candidates, key=lambda t: in_month.get(t, (0, 0.0)), reverse=True))
+
+    def _option_text(t: str) -> str:
+        if t == ALL_PHOTOS:
+            return "Everything"
+        if month is not None and t in in_month:
+            n, lift = in_month[t]
+            return f"{_name(t)}  ·  {n} in {when}" + (f"  ↑{lift:.1f}×" if lift >= 1.5 else "")
+        return f"{_name(t)}  ·  {photographers_by_tag.get(t, 0):,} photographers"
+
+    subject_options = [ALL_PHOTOS, *candidates.tolist()]
+    if st.session_state.get("subject") not in subject_options:
+        st.session_state["subject"] = ALL_PHOTOS
     tag = st.selectbox(
         "What do you want to photograph?",
-        [ALL_PHOTOS] + significant["label"].astype(str).tolist(),
-        format_func=lambda t: "Everything" if t == ALL_PHOTOS else f"{t}  ·  {photographers_by_tag.get(t, 0):,} photographers",
-        help="Subjects that cluster in specific places (Moran's I, FDR-corrected), strongest clustering first.",
+        subject_options,
+        format_func=_option_text,
+        key="subject",
+        help="Subjects that cluster in specific places (Moran's I, FDR-corrected). "
+        "With a month picked, the most photographed that month come first; ↑ marks unusually seasonal ones.",
     )
     only_hot = st.checkbox(
         "Only significant hot spots",
@@ -155,29 +207,40 @@ with st.sidebar:
 
 # --- per-tag view ----------------------------------------------------------
 
-if tag == ALL_PHOTOS:
-    view = hexes.assign(value=hexes["photographers"])
-    hot = (view["density_gi_z"] > 0) & (view["density_fdr"] < alpha)
-    view = view.assign(gi_z=view["density_gi_z"].where(hot))
-    hot_count = int(hot.sum())
+use_month = month is not None and not monthly_counts.empty
+if use_month:
+    # Photographers in the chosen month only; hot-spot markers stay all-year (Gi* is computed per year).
+    per_hex = monthly_counts[(monthly_counts["label"] == tag) & (monthly_counts["month"] == month)]
+    view = hexes.drop(columns="photographers").merge(per_hex[["hex_id", "photographers"]], on="hex_id")
+elif tag == ALL_PHOTOS:
+    view = hexes.copy()
 else:
     per_tag = label_counts[label_counts["label"] == tag][["hex_id", "photographers"]]
     view = hexes.drop(columns="photographers").merge(per_tag, on="hex_id")
-    view = view.assign(value=view["photographers"])
+view = view.assign(value=view["photographers"])
+if tag == ALL_PHOTOS:
+    hot = (view["density_gi_z"] > 0) & (view["density_fdr"] < alpha)
+    view = view.assign(gi_z=view["density_gi_z"].where(hot))
+else:
     tag_hot = local_hotspots.loc[local_hotspots["label"] == tag, ["hex_id", "gi_z"]]
     view = view.merge(tag_hot, on="hex_id", how="left")
-    hot_count = int(view["gi_z"].notna().sum())
+hot_count = int(view["gi_z"].notna().sum())
 view = view[view["value"] >= min_photographers]
 if only_hot:
     view = view[view["gi_z"].notna()]
 view = view.reset_index(drop=True)
 
 subject = "everything" if tag == ALL_PHOTOS else tag
-st.title("Where to shoot " + ("in the area" if tag == ALL_PHOTOS else tag))
+month_name = "" if month is None else ["January", "February", "March", "April", "May", "June", "July",
+                                       "August", "September", "October", "November", "December"][month - 1]
+st.title("Where to shoot " + ("in the area" if tag == ALL_PHOTOS else tag) + (f" in {month_name}" if month_name else ""))
 st.caption(
     "Hot spots from geotagged photos, counted by unique photographers. "
     "Click a hexagon for that spot's subjects, photos and best times."
+    + (" Counts are for the chosen month; ★ hot spots are based on the whole year." if use_month else "")
 )
+if month is not None and monthly_counts.empty:
+    st.info("These outputs have no per-month counts yet; rerun `spatial-pipeline hotspots` to filter the map by month.")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Photos", f"{meta['num_photos']:,}")
@@ -186,7 +249,10 @@ c3.metric("Spots on the map", f"{len(view):,}")
 c4.metric("Significant hot spots", f"{hot_count:,}")
 
 if view.empty:
-    st.warning("No hexes match the current filters. Lower the minimum photographers or turn off the hot-spot filter.")
+    st.warning(
+        "No hexes match the current filters. Try another month, lower the minimum photographers, "
+        "or turn off the hot-spot filter."
+    )
     st.stop()
 
 view["polygon"] = _polygons(view["x"].to_numpy(), view["y"].to_numpy(), resolution, str(meta["crs"]))
@@ -263,7 +329,12 @@ spot = hexes[hexes["hex_id"] == selected] if selected is not None else hexes.ilo
 with side_col:
     if not spot.empty:
         s = spot.iloc[0]
-        here = label_counts[label_counts["hex_id"] == selected].sort_values("photographers", ascending=False)
+        if use_month:
+            here = monthly_counts[(monthly_counts["hex_id"] == selected) & (monthly_counts["month"] == month)
+                                  & (monthly_counts["label"] != ALL_PHOTOS)]
+        else:
+            here = label_counts[label_counts["hex_id"] == selected]
+        here = here.sort_values("photographers", ascending=False)
         hot_here = set(local_hotspots.loc[local_hotspots["hex_id"] == selected, "label"])
         is_hot = (tag == ALL_PHOTOS and s["density_fdr"] < alpha and s["density_gi_z"] > 0) or tag in hot_here
         st.subheader("Selected spot")
@@ -284,9 +355,11 @@ with side_col:
             st.markdown(
                 "**Here:** " + " · ".join(f"{r.label} {r.photographers}" for r in groups.head(6).itertuples())
             )
-        st.markdown("**Top subjects here**")
+        st.markdown("**Top subjects here**" + (f" in {month_name}" if use_month else ""))
         top_here = here[~is_group].head(8)
-        top_here = top_here.assign(subject=np.where(top_here["label"].isin(hot_here), "★ ", "") + top_here["label"])
+        top_here = top_here.assign(
+            subject=np.where(top_here["label"].isin(hot_here), "★ ", "") + top_here["label"].map(_name)
+        )
         st.dataframe(
             top_here[["subject", "photographers"]], hide_index=True, use_container_width=True,
             column_config={"subject": st.column_config.TextColumn(help="★ = significant hot spot for this subject")},
@@ -297,10 +370,26 @@ with side_col:
         st.markdown("**Photos from this spot**")
         _photo_grid(pool)
     else:
-        st.subheader("Everything" if tag == ALL_PHOTOS else tag.capitalize())
+        st.subheader("Everything" if tag == ALL_PHOTOS else _name(tag)[:1].upper() + _name(tag)[1:])
+        if tag != ALL_PHOTOS and group_of.get(tag):
+            st.caption(group_of[tag].capitalize())
         peaks = describe_peaks(timing, tag)
         if peaks:
             st.markdown(f"**Best times:** {peaks}")
+        if month is not None and tag == ALL_PHOTOS:
+            # What is photographed unusually often this month (lift), among place-specific subjects.
+            season = month_rows[(month_rows["bin"] == month) & month_rows["label"].isin(set(significant["label"]))
+                                & (month_rows["photographers"] >= 3) & (month_rows["lift"] >= 1.2)]
+            season = season.sort_values(["lift", "photographers"], ascending=False).head(8)
+            st.markdown(f"**In season in {month_name}**")
+            if season.empty:
+                st.caption("Nothing stands out this month yet.")
+            for r in season.itertuples():
+                st.button(
+                    f"{_name(r.label)}  ·  ↑{r.lift:.1f}×", key=f"season-{r.label}",
+                    on_click=_pick_subject, args=(r.label,), use_container_width=True,
+                    help=f"{int(r.photographers)} photographers in {month_name}",
+                )
         top_ids = view.nlargest(6, "value")["hex_id"]
         pool = photo_samples[photo_samples["hex_id"].isin(top_ids) & (photo_samples["label"] == tag)]
         st.markdown("**Photos from the top spots**")

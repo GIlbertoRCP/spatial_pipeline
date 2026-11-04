@@ -332,3 +332,96 @@ def test_streamlit_app_selected_spot_panel(tmp_path, photos, monkeypatch):
     at.button[0].click().run()  # clear selection
     assert not at.exception
     assert not any(s.value == "Selected spot" for s in at.subheader)
+
+
+SEASON_OF = {"maroon bells": 9, "red rocks": 7, "garden of the gods": 4, "denver": 12}
+
+
+def seasonal(photos: pd.DataFrame) -> pd.DataFrame:
+    """Fixture photos with each landmark photographed in its own month (others spread over the year)."""
+    rng = np.random.default_rng(1)
+    months = []
+    for tags in photos["tags"]:
+        hit = next((m for t, m in SEASON_OF.items() if t in tags.split(",")), None)
+        months.append(hit if hit is not None else int(rng.integers(1, 13)))
+    taken = [pd.Timestamp(2012, m, 14, 18, 30) for m in months]
+    return photos.assign(taken_at=taken)
+
+
+def test_subject_info_uses_taxonomy_when_present():
+    from spatial_pipeline.hotspots import subject_info
+
+    photos = pd.DataFrame({
+        "tags": ["elk,mammals", "elk,mammals", "quaking aspen,plants", "skyline"],
+        "iconic_taxon": ["Mammalia", "Mammalia", "Plantae", ""],
+        "taxon_name": ["Cervus canadensis", "Cervus canadensis", "Populus tremuloides", ""],
+    })
+    info = subject_info(photos, ["elk", "mammals", "quaking aspen", "skyline"]).set_index("label")
+    assert info.loc["elk", "group"] == "mammals" and info.loc["elk", "scientific_name"] == "Cervus canadensis"
+    assert info.loc["mammals", "group"] == "mammals" and info.loc["mammals", "scientific_name"] == ""
+    assert info.loc["skyline", "group"] == "" and info.loc["skyline", "scientific_name"] == ""
+    assert subject_info(photos.drop(columns=["iconic_taxon"]), ["elk"])["group"].tolist() == [""]
+
+
+def test_monthly_label_counts(photos):
+    from spatial_pipeline.hotspots import monthly_label_counts
+    from spatial_pipeline.timing import ALL_LABEL
+
+    p = seasonal(photos)
+    result = compute_hotspots(p, min_label_photographers=5, min_hex_photographers=1)
+    monthly = monthly_label_counts(p, result)
+
+    bells = monthly[monthly["label"] == "maroon bells"]
+    assert set(bells["month"]) == {9}
+    assert bells["photographers"].sum() == result.label_counts.query("label == 'maroon bells'")["photographers"].sum()
+    overall = monthly[monthly["label"] == ALL_LABEL]
+    assert overall.groupby("hex_id")["photographers"].sum().ge(1).all()
+    prolific_hex = result.hexes.sort_values("photos").iloc[-1]["hex_id"]
+    assert (overall[overall["hex_id"] == prolific_hex]["photographers"] == 1).all()  # one person, once per month
+    assert monthly_label_counts(p.assign(taken_at=pd.NaT), result).empty
+
+
+def test_streamlit_app_month_and_group_filters(tmp_path, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    from spatial_pipeline.hotspots import (
+        monthly_label_counts,
+        sample_photos,
+        save_photo_samples,
+        subject_info,
+    )
+    from spatial_pipeline.timing import compute_timing, save_timing
+
+    src = str(tmp_path / "yfcc.tsv")
+    write_tsv(src)
+    p = seasonal(read_yfcc_metadata(src, bbox=COLORADO_BBOX))
+    result = compute_hotspots(p, min_label_photographers=5, min_hex_photographers=1)
+    out_dir = str(tmp_path / "hotspots")
+    save_hotspots(result, out_dir)
+    save_timing(compute_timing(p), out_dir)
+    save_photo_samples(sample_photos(p, result), out_dir)
+    subject_info(p, result.labels).to_parquet(os.path.join(out_dir, "subjects.parquet"), index=False)
+    monthly_label_counts(p, result).to_parquet(os.path.join(out_dir, "monthly_counts.parquet"), index=False)
+    monkeypatch.setenv("HOTSPOTS_DIR", out_dir)
+    app_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "app.py")
+
+    at = AppTest.from_file(app_path, default_timeout=60).run()
+    assert not at.exception
+
+    at.select_slider(key="when").set_value("Sep").run()
+    assert not at.exception
+    assert "in September" in at.title[0].value
+    options = at.selectbox(key="subject").options
+    first_subject = options[1]
+    assert "maroon bells" in first_subject or "aspen" in first_subject or "lake" in first_subject
+    season_buttons = [b for b in at.button if b.key and b.key.startswith("season-")]
+    assert season_buttons, "expected in-season suggestions for September"
+
+    season_buttons[0].click().run()
+    assert not at.exception
+    assert at.selectbox(key="subject").value in {"maroon bells", "aspen", "lake"}
+    assert "September" in at.title[0].value
+
+    at.select_slider(key="when").set_value("Jan").run()
+    assert not at.exception
+    assert any("No hexes match" in w.value for w in at.warning)  # maroon bells is never shot in January

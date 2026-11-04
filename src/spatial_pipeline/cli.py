@@ -23,9 +23,11 @@ from spatial_pipeline.graphs import (
 )
 from spatial_pipeline.hotspots import (
     compute_hotspots,
+    monthly_label_counts,
     sample_photos,
     save_hotspots,
     save_photo_samples,
+    subject_info,
 )
 from spatial_pipeline.io import (
     generate_vectorized_mock_data,
@@ -242,6 +244,8 @@ def hotspots(
     save_hotspots(result, output_dir, extra_meta={"input": input, "normalize": normalize, "alpha": alpha})
     save_timing(timing, output_dir)
     save_photo_samples(sample_photos(photos, result), output_dir)
+    subject_info(photos, result.labels).to_parquet(os.path.join(output_dir, "subjects.parquet"), index=False)
+    monthly_label_counts(photos, result).to_parquet(os.path.join(output_dir, "monthly_counts.parquet"), index=False)
 
     console.print(
         f"[bold green][+] {len(result.hexes):,} active hexes ({len(result.stats_hex_ids):,} used for statistics), "

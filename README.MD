@@ -121,7 +121,9 @@ spatial-pipeline hotspots --input photos.parquet --output-dir hotspots --resolut
 spatial-pipeline ui
 ```
 
-In the map, pick a subject in the sidebar, then click any hexagon to open that spot. The panel
+In the map, pick a month with *When* to see what is in season and where it's photographed that
+month. Narrow subjects with the group pills (birds, mammals, plants, ...), pick one, then click any
+hexagon to open that spot. The panel
 shows its top subjects (★ = significant hot spot), photos with photographer credits, and a
 directions link. The selection is kept in the URL (`?hex=...`), so a spot can be shared as a link.
 
