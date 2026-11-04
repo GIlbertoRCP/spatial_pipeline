@@ -1,79 +1,76 @@
-# Spatial Pipeline
+# Photo Hotspots
 
-```{image} https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-blue.svg
-:alt: Python Version
-```
-```{image} https://img.shields.io/badge/License-MIT-green.svg
-:alt: License
-```
-```{image} https://img.shields.io/badge/GPU-RAPIDS%20cuGraph%20%7C%20cuML-76B900.svg
-:alt: GPU RAPIDS
-```
-```{image} https://img.shields.io/badge/Out--of--Core-Dask%20%7C%20Zarr-orange.svg
-:alt: Out-of-Core Dask/Zarr
-```
+**Where and when should I go to photograph elk, bighorn sheep or columbines?**
 
-**`spatial_pipeline`** is a high-performance computational engine for spatial transcriptomics (10x Genomics Xenium, Vizgen MERSCOPE, Nanostring CosMx, Stereo-seq). It provides ultra-fast spatial binning, GPU-accelerated spatial graph generation (RAPIDS cuGraph & cuML), Dask/Zarr out-of-core streaming for out-of-RAM datasets, Spatially Variable Label (SVG) detection, and seamless AnnData / PyTorch Geometric interoperability.
+`spatial_pipeline` finds wildlife and nature photo hotspots in millions of geotagged photos. It
+pulls photographed observations from [iNaturalist](https://www.inaturalist.org) (free, no API key)
+or historic Flickr photos from YFCC100M, bins them into equal-area hexagons, and counts **unique
+photographers** rather than raw photos. Spatial statistics then show which subjects cluster in specific
+places (Moran's *I*), where their significant hot spots are (Getis-Ord *Gi\**), and when they are
+photographed (month and hour profiles with lift).
 
----
-
-## Key Highlights
-
-- **⚡ Blazing Fast Spatial Binning**: Vectorized spatial hashing (Square, Hexagonal Axial, KD-Tree, Quadtree, and Adaptive Voronoi) processing millions of transcripts in seconds with minimal memory overhead.
-- **🚀 GPU Graph Acceleration**: Build spatial radius and k-NN graphs and Graph Laplacians at scale on NVIDIA GPUs using RAPIDS cuGraph & cuML with seamless multi-core CPU fallbacks.
-- **💾 Chunked Out-of-Core Processing**: Ingest and bin massive spatial coordinate datasets exceeding host RAM using **Dask Distributed DataFrames** and stream sub-matrices with **Zarr**.
-- **🧬 Spatially Variable Label (SVG) Discovery**: Vectorized computation of Moran's $I$, Geary's $C$, analytical $z$-scores, and Benjamini-Hochberg FDR $p$-values.
-- **🔗 Ecosystem Interoperability**: Bi-directional conversions to [Scanpy](https://scanpy.readthedocs.io/) / [Squidpy](https://squidpy.readthedocs.io/) `AnnData` (.h5ad, .zarr) and [PyTorch Geometric](https://pytorch-geometric.readthedocs.io/) `Data` for Spatial Graph Neural Networks (GNNs).
+On one month of real Denver-area observations (June 2025: 6,417 observations from 954 observers),
+the significant hot spots land where a naturalist would point you. Black-tailed prairie dogs
+cluster on the Rocky Mountain Arsenal refuge, mallards along the South Platte and city lakes, and
+pinewoods geranium in the western foothills.
 
 ---
 
-## Quick Example
+## Quick example
+
+```bash
+pip install -e .
+spatial-pipeline fetch-inat --bbox denver --observed-from 2025-06-01 --observed-to 2025-06-30 --output photos.parquet
+spatial-pipeline hotspots --input photos.parquet --output-dir hotspots
+spatial-pipeline ui
+```
 
 ```python
-import spatial_pipeline as sp
+from spatial_pipeline import DENVER_METRO_BBOX, INatClient, INatFetcher, compute_hotspots
 
-# 1. Ingest coordinate data with zero-copy PyArrow
-df = sp.load_transcript_data("transcripts.csv", use_arrow=True)
+fetcher = INatFetcher(INatClient(), cache_dir=".inat_cache")
+photos = fetcher.fetch(INatFetcher.build_query(DENVER_METRO_BBOX, observed_from="2025-06-01"))
+result = compute_hotspots(photos, resolution=1000.0)
 
-# 2. Vectorized 10µm square spatial binning
-sparse_counts, bin_coords = sp.compute_square_bins(df, resolution=10.0)
-
-# 3. Build spatial adjacency graph (GPU or multi-core CPU)
-adj_matrix, laplacian = sp.build_spatial_graph(bin_coords, max_distance=15.0, backend="auto")
-
-# 4. Discover Spatially Variable Labels
-svgs = sp.compute_spatially_variable_labels(
-    sparse_counts, 
-    label_names=df["label"].cat.categories, 
-    adjacency_matrix=adj_matrix,
-    top_n=10
-)
-print(svgs)
-
-# 5. Export to AnnData (.h5ad) or chunked Zarr
-adata = sp.to_anndata(sparse_counts, bin_coords, labels=df["label"].cat.categories, adjacency_matrix=adj_matrix)
-sp.to_zarr(adata, "spatial_processed.zarr")
+result.ranking.head(10)   # subjects ranked by spatial clustering (Moran's I, FDR-corrected)
+result.local_hotspots     # significant Gi* hot spots per (hex, subject)
 ```
 
 ---
 
-## Table of Contents
+## What's inside
+
+| Piece | What it does |
+| :--- | :--- |
+| Data sources | iNaturalist fetcher (id-based paging, privacy and accuracy filters, resumable), YFCC100M reader (TSV / SQLite), Flickr fetcher (needs a Pro key) |
+| Hotspots | Hex binning on an equal-area projection, photographer-weighted counts, Moran's *I* ranking, Getis-Ord *Gi\** hot spots, Benjamini-Hochberg FDR |
+| Timing | Month and hour-of-day profiles per subject, with lift against all photos |
+| Dashboard | Streamlit + deck.gl map: month and group filters, click-a-spot details, credited photos |
+| Engine | Generic labeled-point binning, CPU/GPU spatial graphs, out-of-core tiling and Dask / Zarr streaming |
 
 ```{toctree}
 :maxdepth: 2
-:caption: Getting Started
+:caption: Getting started
 
 installation
-tutorials/quickstart
+quickstart
 ```
 
 ```{toctree}
 :maxdepth: 2
-:caption: Advanced Guides
+:caption: Guides
 
-gpu_acceleration
+data_sources
+methods
+dashboard
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Engine
+
 out_of_core_dask_zarr
-tutorials/out_of_core_streaming
+gpu_acceleration
 ```
 
 ```{toctree}

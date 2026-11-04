@@ -1,6 +1,7 @@
 # Spatial Pipeline: Photo Hotspot Engine
 
 [![CI/CD Pipeline](https://github.com/gilbertorcp/spatial_pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/gilbertorcp/spatial_pipeline/actions/workflows/ci.yml)
+[![Docs](https://github.com/GIlbertoRCP/spatial_pipeline/actions/workflows/docs.yml/badge.svg)](https://gilbertorcp.github.io/spatial_pipeline/)
 [![Python Version](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](https://pypi.org/project/spatial-pipeline/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -14,6 +15,8 @@ On one month of real Denver-area observations (June 2025: 6,417 observations, 95
 the significant hot spots land where a naturalist would point you. Black-tailed prairie dogs
 cluster on the Rocky Mountain Arsenal refuge, mallards along the South Platte and city lakes, and
 pinewoods geranium in the western foothills.
+
+📖 **Documentation:** <https://gilbertorcp.github.io/spatial_pipeline/>
 
 > **Status:** milestone 1 of [PLAN.md](PLAN.md): a hotspot map built from photo metadata.
 > Image embeddings, seasonal and golden-hour timing, and the live "shoot tonight" layer come in

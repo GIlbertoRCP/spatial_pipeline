@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Map: "When" month slider (map counts and spot details for that month; subjects ordered by what is photographed that month, ↑ marking unusually seasonal ones); group pills (birds, mammals, plants, ...); subjects shown with scientific names; an "In season" list of one-click suggestions for the chosen month.
 - Dashboard redesign: dark theme with golden-hour accents (`.streamlit/config.toml`, applied by `spatial-pipeline ui`); a map + detail-panel layout; click a hexagon to open a spot panel (subjects with ★ hot-spot markers, photos with credits, directions), with the selection kept in a shareable `?hex=` link and outlined on the map; a color legend; readable tooltips; a log-scaled color ramp with transparency for quiet spots; plain-language metrics; and the data folder moved into a collapsed "Data source" section.
 
+### Changed
+- Documentation site rewritten for the photo hotspot project: home, installation, quickstart, data sources, methods, dashboard, engine pages and an API reference covering the new modules. The transcriptomics tutorial notebooks and the unmeasured GPU speedup table are removed; the version comes from the package.
+- Docs workflow: builds with warnings as errors, builds on pull requests without deploying, and adds `configure-pages`.
+
 ### Fixed
 - CI: ruff errors in `graphs.py` / `out_of_core.py`, mypy errors from zarr 3 typing and the pinned Python version; pandas floor raised to 2.0.
 

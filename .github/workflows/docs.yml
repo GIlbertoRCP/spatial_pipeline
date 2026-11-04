@@ -1,7 +1,12 @@
 name: Build and Deploy Documentation
 
+# Deploying needs GitHub Pages enabled for the repository with
+# Settings -> Pages -> Build and deployment -> Source: "GitHub Actions".
+
 on:
   push:
+    branches: [ main, master ]
+  pull_request:
     branches: [ main, master ]
   workflow_dispatch:
 
@@ -11,7 +16,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: "pages"
+  group: "pages-${{ github.ref }}"
   cancel-in-progress: false
 
 jobs:
@@ -33,23 +38,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .[docs]
 
-      - name: Build HTML Documentation
+      - name: Build HTML Documentation (warnings are errors)
         run: |
-          sphinx-build -b html docs docs/_build/html
+          sphinx-build -b html -W --keep-going docs docs/_build/html
 
       - name: Upload GitHub Pages Artifact
+        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs/_build/html
 
   deploy:
     name: Deploy to GitHub Pages
+    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

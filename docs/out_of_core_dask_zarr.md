@@ -1,57 +1,62 @@
-# Chunked Out-of-Core Processing (Dask / Zarr)
+# Large datasets: out-of-core processing
 
-Large spatial transcriptomics datasets (such as 100M+ transcript observations) easily exceed available host RAM. `spatial_pipeline` provides out-of-core streaming and parallel matrix operations using **Dask Distributed DataFrames/Arrays** and **Zarr** hierarchical storage.
+The spatial engine underneath the photo tools works on any labeled 2D points (`x`, `y`, `label`).
+For inputs larger than memory it offers tiled processing with halo exchange, Dask-based binning
+and Zarr streaming.
 
----
+The photo commands don't need these for a region like Colorado. They matter for the planned
+full-scale run over all ~48M geotagged YFCC100M photos.
 
-## 1. Dask Distributed Spatial Binning
+## Tiles with halo exchange
 
-For raw coordinate CSV files larger than RAM, `spatial_pipeline.dask_bin_transcripts()` partitions the file into chunks on disk and calculates spatial bin assignments and count aggregations out-of-core without exceeding memory limits:
+`partition_dataset_to_tiles` splits a point file into spatial tiles on disk. `process_tile_out_of_core`
+bins one tile and builds its sub-graph using a halo of neighboring points, so bins on tile
+borders get the same neighbors they would in a single pass. `stitch_out_of_core_results` merges
+the tiles into global matrices.
 
 ```python
+import os
+
 import spatial_pipeline as sp
 
-# Out-of-core binning on massive transcript CSV
-sparse_counts, bin_coords, unique_labels = sp.dask_bin_transcripts(
-    "massive_transcripts.csv",
-    resolution=10.0,
-    min_counts=1,
-    blocksize="128MB"
+sp.partition_dataset_to_tiles("points.csv", tile_size=5000.0, partition_dir="tiles")
+
+# Tiles are written as tiles/tile_<x>_<y>.csv
+tiles = [tuple(int(v) for v in f[5:-4].split("_")) for f in os.listdir("tiles")
+         if f.startswith("tile_") and f.endswith(".csv")]
+sp.process_tiles_parallel_out_of_core(
+    tiles, tile_size=5000.0, resolution=1000.0, max_dist=1050.0,
+    partition_dir="tiles", tmp_out_dir="tile_results", n_jobs=4,
 )
+counts, centers, labels, adjacency, laplacian = sp.stitch_out_of_core_results("tile_results", resolution=1000.0)
 ```
 
----
+`run_pipeline.py` wraps these steps into one command.
 
-## 2. Zarr Chunked Storage & Streaming
+`enforce_memory_limit` and `profile_out_of_core_execution` cap and measure peak memory, to check
+that a run stays within a budget.
 
-`spatial_pipeline` allows saving AnnData objects directly to Zarr stores with custom chunking:
+## Dask binning
+
+`dask_bin_transcripts` bins a CSV of `x, y, label` points with Dask DataFrames, a chunk at a time:
 
 ```python
-# Convert and save to Zarr store
-adata = sp.to_anndata(sparse_counts, bin_coords, labels=unique_labels)
-sp.to_zarr(adata, "experiment.zarr", chunks=(10000, len(unique_labels)))
+counts, centers, labels = sp.dask_bin_transcripts("points.csv", resolution=1000.0, blocksize="128MB")
 ```
 
-### Out-of-Core Batch Streaming
+## Zarr storage and streaming
 
-Stream slices of massive datasets for downstream deep learning models without loading full arrays into memory:
+Binned matrices can be stored as chunked Zarr (via AnnData) and streamed back in batches, for
+example to train a graph neural network without loading everything into memory:
 
 ```python
-for batch_X, batch_spatial, var_names in sp.stream_zarr_anndata("experiment.zarr", chunk_size=5000):
-    # Process batch in GNN / neural network training loop
-    train_step(batch_X, batch_spatial)
+adata = sp.to_anndata(counts, centers, labels=labels, adjacency_matrix=adjacency)
+sp.to_zarr(adata, "hexes.zarr", chunks=(10000, len(labels)))
+
+for batch_X, batch_coords, names in sp.stream_zarr_anndata("hexes.zarr", chunk_size=5000):
+    ...
+
+metrics = sp.dask_compute_spatial_metrics("hexes.zarr", chunk_size=10000)  # mean, var, sparsity
 ```
 
----
-
-## 3. Parallel Dask Matrix Computations
-
-Compute label dispersion, mean, variance, and sparsity across out-of-core Zarr datasets using Dask Array operations:
-
-```python
-metrics = sp.dask_compute_spatial_metrics("experiment.zarr", chunk_size=10000)
-
-print("Mean label counts:", metrics["mean"])
-print("Label variance:", metrics["var"])
-print("Label sparsity:", metrics["sparsity"])
-```
+Streaming needs a dense `X`. Sparse stores raise a clear error.

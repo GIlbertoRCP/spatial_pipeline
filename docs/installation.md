@@ -1,55 +1,41 @@
-# Installation Guide
+# Installation
 
-`spatial_pipeline` supports standard CPU environments as well as NVIDIA CUDA-accelerated setups with RAPIDS cuGraph and cuML.
+`spatial_pipeline` needs Python 3.10 or newer. It runs on Windows, macOS and Linux, and on a CPU
+only. NVIDIA GPU acceleration is optional.
 
----
-
-## 1. Standard Installation (CPU)
-
-To install `spatial_pipeline` with default CPU dependencies:
+## From source
 
 ```bash
-pip install spatial_pipeline
-```
-
-To install from source:
-
-```bash
-git clone https://github.com/gilbertorcp/spatial_pipeline.git
+git clone https://github.com/GIlbertoRCP/spatial_pipeline.git
 cd spatial_pipeline
 pip install -e .
 ```
 
----
+This installs the `spatial-pipeline` command and the Python package.
 
-## 2. GPU Acceleration (RAPIDS cuGraph / cuML)
-
-For GPU acceleration on NVIDIA Linux systems, install the RAPIDS 24+ ecosystem:
+## Optional extras
 
 ```bash
-pip install spatial_pipeline[gpu]
+pip install -e .[test]   # pytest, coverage, mypy
+pip install -e .[docs]   # Sphinx, MyST-NB and the book theme, to build this site
+pip install -e .[gpu]    # RAPIDS cuML / cuGraph / CuPy (Linux with an NVIDIA GPU)
 ```
 
-Or via Conda/Mamba:
+The GPU extra only speeds up spatial graph construction on very large inputs (see
+{doc}`gpu_acceleration`). Everything else runs the same without it.
+
+## Check the install
 
 ```bash
-conda install -c rapidsai -c conda-forge -c nvidia \
-    cuml=24.08 cugraph=24.08 cupy cuda-version=12.5
+spatial-pipeline --help
+pytest
 ```
 
----
-
-## 3. Optional Feature Extras
-
-You can install optional dependency groups based on your workflow:
+## Build the documentation locally
 
 ```bash
-# Documentation building dependencies
-pip install spatial_pipeline[docs]
-
-# Testing & Type Checking dependencies
-pip install spatial_pipeline[test]
-
-# Complete installation with all optional features
-pip install spatial_pipeline[all]
+pip install -e .[docs]
+sphinx-build -b html docs docs/_build/html
 ```
+
+Open `docs/_build/html/index.html` in a browser.
